@@ -1,0 +1,14 @@
+{
+  "name": "Challenge Gym Admin",
+  "short_name": "CG Admin",
+  "description": "Members, renewals, payments, attendance and door access for Challenge Gym.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0E0F11",
+  "theme_color": "#0E0F11",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

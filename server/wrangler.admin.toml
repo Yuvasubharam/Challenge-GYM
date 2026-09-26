@@ -1,0 +1,22 @@
+# Admin API worker — reached only through the admin-app Pages project (service binding).
+name = "challenge-gym-admin-api"
+main = "src/workers/admin.ts"
+compatibility_date = "2024-12-01"
+workers_dev = false          # no public URL; only the admin Pages app can call it
+
+[[d1_databases]]
+binding = "DB"
+database_name = "challenge-gym"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "challenge-gym-files"
+
+[vars]
+GYM_TZ_OFFSET_MIN = "330"
+
+# Secrets (different from the member worker!):
+#   wrangler secret put JWT_SECRET  -c wrangler.admin.toml
+#   wrangler secret put SETUP_TOKEN -c wrangler.admin.toml

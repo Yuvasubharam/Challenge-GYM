@@ -1,0 +1,37 @@
+{
+  "name": "challenge-gym-server",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev:device": "wrangler dev -c wrangler.device.toml --port 8790 --ip 0.0.0.0 --persist-to .wrangler/state",
+    "dev:admin": "wrangler dev -c wrangler.admin.toml --port 8788 --persist-to .wrangler/state",
+    "dev:member": "wrangler dev -c wrangler.member.toml --port 8789 --persist-to .wrangler/state",
+    "deploy:device": "wrangler deploy -c wrangler.device.toml",
+    "deploy:admin": "wrangler deploy -c wrangler.admin.toml",
+    "deploy:member": "wrangler deploy -c wrangler.member.toml",
+    "db:migrate:local": "wrangler d1 migrations apply challenge-gym --local -c wrangler.device.toml --persist-to .wrangler/state",
+    "db:migrate:remote": "wrangler d1 migrations apply challenge-gym --remote -c wrangler.device.toml",
+    "db:seed:local": "wrangler d1 execute challenge-gym --local -c wrangler.device.toml --persist-to .wrangler/state --file=./seed/seed.sql",
+    "db:seed:remote": "wrangler d1 execute challenge-gym --remote -c wrangler.device.toml --file=./seed/seed.sql",
+    "db:fitness:build": "node scripts/build-fitness-seed.mjs",
+    "db:fitness:local": "node scripts/load-fitness-seed.mjs local",
+    "db:fitness:remote": "node scripts/load-fitness-seed.mjs remote",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "hono": "^4.6.14"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241218.0",
+    "typescript": "~5.8.2",
+    "vitest": "^2.1.8",
+    "wrangler": "^3.99.0"
+  },
+  "allowScripts": {
+    "esbuild@0.21.5": true,
+    "esbuild@0.17.19": true,
+    "workerd@1.20250718.0": true
+  }
+}

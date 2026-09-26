@@ -1,0 +1,21 @@
+# Member API worker — reached only through the member-app Pages project (service binding).
+name = "challenge-gym-member-api"
+main = "src/workers/member.ts"
+compatibility_date = "2024-12-01"
+workers_dev = false
+
+[[d1_databases]]
+binding = "DB"
+database_name = "challenge-gym"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "challenge-gym-files"
+
+[vars]
+GYM_TZ_OFFSET_MIN = "330"
+
+# Secret — MUST differ from the admin worker's:
+#   wrangler secret put JWT_SECRET -c wrangler.member.toml

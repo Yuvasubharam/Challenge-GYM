@@ -1,0 +1,15 @@
+{
+  "name": "Challenge Gym",
+  "short_name": "Challenge Gym",
+  "description": "Your membership, visits, payments and door access.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0E0F11",
+  "theme_color": "#0E0F11",
+  "categories": ["fitness", "health", "lifestyle"],
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

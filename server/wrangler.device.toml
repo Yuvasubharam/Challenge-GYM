@@ -1,0 +1,20 @@
+# Device worker: eSSL X990 ADMS endpoint + gym-PC agent API + reconciler cron.
+# Point the X990 "Cloud Server" at this worker's hostname (HTTP, port 80).
+name = "challenge-gym-device"
+main = "src/workers/device.ts"
+compatibility_date = "2024-12-01"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "challenge-gym"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[vars]
+GYM_TZ_OFFSET_MIN = "330"
+DEVICE_SN_ALLOWLIST = "CUB7252100258"
+
+# Secrets: wrangler secret put AGENT_TOKEN -c wrangler.device.toml

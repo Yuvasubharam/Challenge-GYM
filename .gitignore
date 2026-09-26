@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+*.log
+agent/.env
+agent/tools/cloud_server_original.json
+__pycache__/
+
+
+# Member data — never commit (the repo is public)
+*.xlsx
+*.xls
+*.csv
+# Downloaded dataset cache (scripts/build-fitness-seed.mjs re-downloads it)
+server/seed/data/cache/
