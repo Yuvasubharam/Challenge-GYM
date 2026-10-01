@@ -25,13 +25,13 @@ const tooltipStyle = { background: '#0E0F11', border: '1px solid #2A2E33', borde
 function Kpi({ label, value, sub, tone, to }: { label: string; value: string | number; sub?: string; tone?: 'lime' | 'warn' | 'bad' | 'info'; to?: string }) {
   const dot = { lime: 'bg-lime', warn: 'bg-warn', bad: 'bg-bad', info: 'bg-info' }[tone ?? 'lime'];
   const body = (
-    <div className="card card-pad h-full hover:border-ink-300 dark:hover:border-ink-500 transition">
+    <div className="card card-pad h-full min-w-0 hover:border-ink-300 dark:hover:border-ink-500 transition">
       <div className="flex items-center gap-2 text-xs font-semibold muted"><span className={`w-2 h-2 rounded-full ${dot}`} />{label}</div>
       <p className="kpi mt-3">{value}</p>
       {sub && <p className="text-xs muted mt-2">{sub}</p>}
     </div>
   );
-  return to ? <Link to={to} className="block">{body}</Link> : body;
+  return to ? <Link to={to} className="block min-w-0">{body}</Link> : body;
 }
 
 export default function Dashboard() {
@@ -58,7 +58,7 @@ export default function Dashboard() {
 
       {/* Hero row — dark card with ring like the reference "Health Grade" */}
       <div className="grid gap-4 lg:grid-cols-3 mb-4">
-        <div className="card-ink p-5 lg:col-span-2 flex flex-col sm:flex-row gap-5 sm:items-center relative overflow-hidden isolate">
+        <div className="card-ink p-5 lg:col-span-2 min-w-0 flex flex-col sm:flex-row gap-5 sm:items-center relative overflow-hidden isolate">
           <div className="absolute -right-20 -top-20 w-64 h-64 rounded-full bg-lime/10 -z-10 pointer-events-none" />
           <Ring value={activePct} size={112} stroke={11}>
             <div><p className="font-display text-2xl font-bold text-white">{activePct}%</p><p className="text-[10px] text-ink-300 -mt-0.5">active</p></div>
@@ -84,7 +84,7 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <Link to="/device" className="card card-pad flex flex-col justify-between hover:border-ink-300 dark:hover:border-ink-500 transition">
+        <Link to="/device" className="card card-pad min-w-0 flex flex-col justify-between hover:border-ink-300 dark:hover:border-ink-500 transition">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 font-semibold"><Cpu className="w-5 h-5" />Door device</div>
             <ArrowUpRight className="w-4 h-4 muted" />
@@ -122,7 +122,7 @@ export default function Dashboard() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-5 mb-6">
-        <div className="card card-pad lg:col-span-3">
+        <div className="card card-pad lg:col-span-3 min-w-0">
           <SectionTitle title="Revenue — last 12 months" action={<span className="text-sm font-semibold">{money(d.months.reduce((s, x) => s + x.revenue, 0))}</span>} />
           <div className="h-64 -ml-3">
             <ResponsiveContainer>
@@ -136,7 +136,7 @@ export default function Dashboard() {
             </ResponsiveContainer>
           </div>
         </div>
-        <div className="card card-pad lg:col-span-2">
+        <div className="card card-pad lg:col-span-2 min-w-0">
           <SectionTitle title="Visitors — last 14 days" action={<Link to="/attendance" className="text-xs font-semibold muted hover:underline">Details</Link>} />
           <div className="h-64 -ml-3">
             <ResponsiveContainer>
@@ -153,29 +153,29 @@ export default function Dashboard() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <div className="card card-pad">
+        <div className="card card-pad min-w-0">
           <SectionTitle title="Renewals due" action={<Link to="/renewals" className="text-xs font-semibold muted hover:underline">All {m.expiring + m.near_expiry}</Link>} />
           {d.due_soon.length === 0 ? <p className="muted text-sm py-6 text-center">Nobody is due in the next 30 days.</p> : (
             <ul className="-mx-1">
               {d.due_soon.map((x) => (
                 <li key={x.id} className="flex items-center gap-3 px-1 py-2.5 border-t first:border-t-0 border-paper-line dark:border-ink-700">
-                  <div className={`w-12 text-center rounded-2xl py-1.5 ${x.days_left <= 3 ? 'bg-bad/15 text-bad' : x.days_left <= 7 ? 'bg-warn/15 text-warn' : 'bg-black/5 dark:bg-white/5'}`}>
+                  <div className={`w-12 shrink-0 text-center rounded-2xl py-1.5 ${x.days_left <= 3 ? 'bg-bad/15 text-bad' : x.days_left <= 7 ? 'bg-warn/15 text-warn' : 'bg-black/5 dark:bg-white/5'}`}>
                     <p className="font-display font-bold leading-none">{x.days_left}</p><p className="text-[9px] font-semibold uppercase">days</p>
                   </div>
                   <Link to={`/members/${x.id}`} className="flex-1 min-w-0">
                     <p className="font-semibold truncate">{x.name} <span className="muted font-normal">#{x.essl_id}</span></p>
                     <p className="text-xs muted truncate">{x.category} · {x.duration_label} · ends {date(x.end_date, false)}</p>
                   </Link>
-                  {x.mobile && <a href={`tel:${x.mobile}`} className="icon-btn" aria-label="Call"><Phone className="w-4 h-4" /></a>}
+                  {x.mobile && <a href={`tel:${x.mobile}`} className="icon-btn shrink-0" aria-label="Call"><Phone className="w-4 h-4" /></a>}
                   {x.mobile && <a href={waLink(x.mobile, `Hi ${x.name}, your Challenge Gym membership ${daysLeftLabel(x.days_left).toLowerCase()} (${date(x.end_date)}). Renew at the front desk or pay by UPI in the member app.`)}
-                    target="_blank" rel="noreferrer" className="btn btn-sm bg-[#25D366]/15 text-green-700 dark:text-[#25D366]">WhatsApp</a>}
+                    target="_blank" rel="noreferrer" className="btn btn-sm shrink-0 bg-[#25D366]/15 text-green-700 dark:text-[#25D366]">WhatsApp</a>}
                 </li>
               ))}
             </ul>
           )}
         </div>
 
-        <div className="card card-pad">
+        <div className="card card-pad min-w-0">
           <SectionTitle title="Recent payments" action={
             d.pending_claims.n > 0
               ? <Link to="/payments?tab=pending" className="badge bg-warn/15 text-amber-700 dark:text-warn">{d.pending_claims.n} UPI to verify</Link>
@@ -184,12 +184,12 @@ export default function Dashboard() {
             <ul>
               {d.recent_payments.map((p) => (
                 <li key={p.id} className="flex items-center gap-3 py-2.5 border-t first:border-t-0 border-paper-line dark:border-ink-700">
-                  <div className="w-9 h-9 rounded-full bg-lime/20 text-lime-700 dark:text-lime flex items-center justify-center"><Wallet className="w-4 h-4" /></div>
+                  <div className="w-9 h-9 shrink-0 rounded-full bg-lime/20 text-lime-700 dark:text-lime flex items-center justify-center"><Wallet className="w-4 h-4" /></div>
                   <Link to={`/members/${p.member_id}`} className="flex-1 min-w-0">
                     <p className="font-semibold truncate">{p.name}</p>
                     <p className="text-xs muted">{date(p.paid_on)} · {p.mode.toUpperCase()}{p.receipt_no ? ` · ${p.receipt_no}` : ''}</p>
                   </Link>
-                  <p className="font-display font-bold">{money(p.amount)}</p>
+                  <p className="font-display font-bold shrink-0">{money(p.amount)}</p>
                 </li>
               ))}
             </ul>

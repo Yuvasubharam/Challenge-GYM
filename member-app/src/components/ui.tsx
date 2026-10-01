@@ -123,7 +123,8 @@ export function Sheet({ open, onClose, title, children, footer }: { open: boolea
           <h2 className="text-lg font-bold">{title}</h2>
           <button className="icon-btn -mr-2" onClick={onClose} aria-label="Close"><X className="w-5 h-5" /></button>
         </div>
-        <div className="px-5 pb-5 overflow-y-auto">{children}</div>
+        {/* Without a footer, the content itself must clear the iPhone home bar. */}
+        <div className={`px-5 overflow-y-auto ${footer ? 'pb-5' : 'pb-[max(env(safe-area-inset-bottom),1.25rem)]'}`}>{children}</div>
         {footer && <div className="px-5 py-4 border-t border-paper-line dark:border-ink-700 safe-bottom">{footer}</div>}
       </div>
     </div>

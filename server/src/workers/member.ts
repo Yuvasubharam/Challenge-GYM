@@ -7,6 +7,7 @@ import { memberAuth } from '../routes/member/auth';
 import { me } from '../routes/member/me';
 import { fit } from '../routes/member/fitness';
 import { memberContent } from '../routes/member/content';
+import { coach } from '../routes/member/coach';
 
 const app = new Hono<AppEnv>().basePath('/api');
 
@@ -18,9 +19,10 @@ app.use('*', async (c, next) => {
   c.header('Referrer-Policy', 'same-origin');
 });
 
-// CSRF: state-changing requests must be JSON, except raw image uploads.
+// CSRF: state-changing requests must be JSON, except raw image uploads. DELETE carries no body
+// (the app's api.del sends none) and can't come from a cross-site form, so it is exempt.
 app.use('*', async (c, next) => {
-  if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
+  if (c.req.method !== 'GET' && c.req.method !== 'HEAD' && c.req.method !== 'DELETE') {
     const ct = c.req.header('content-type') ?? '';
     const isUpload = c.req.method === 'PUT' && /\/me\/(proof|photo)$/.test(c.req.path);
     if (!isUpload && !ct.includes('application/json')) return c.json({ error: 'Expected JSON' }, 415);
@@ -33,6 +35,7 @@ app.route('/auth', memberAuth);
 app.route('/me', me);
 app.route('/fit', fit);
 app.route('/content', memberContent);
+app.route('/coach', coach);
 
 app.onError((err, c) => {
   if (err instanceof HttpError) return c.json({ error: err.message }, err.status as 400);

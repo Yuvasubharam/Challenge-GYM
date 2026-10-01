@@ -17,6 +17,9 @@ export interface MemberSummary {
   device_state: 'unknown' | 'active' | 'blocked' | 'removed';
   photo_key: string | null;
   app_access: number;
+  app_user: number;
+  app_last_login: string | null;
+  has_consent: number;
   membership_id: number | null;
   start_date: string | null;
   end_date: string | null;
@@ -59,4 +62,10 @@ export interface Settings {
   access: { grace_days: number; staff_prefixes: string[]; block_method: string; auto_enforce: boolean };
   reminders: { near_days: number; soon_days: number };
   receipt: { prefix: string; next: number };
+  renewal_push: RenewalPush;
+  renewal_push_log: { day: string | null; at: string | null; members: number; sent: number; failed: number };
+}
+
+export interface RenewalPush {
+  enabled: boolean; days_before: number; send_hour: number; title: string; message: string; motivation: string[];
 }

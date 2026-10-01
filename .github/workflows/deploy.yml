@@ -1,0 +1,214 @@
+# Challenge Gym → Cloudflare (D1 migrations, 3 Workers, 2 Pages apps).
+# Step-by-step setup: DEPLOY.md
+#
+# Runs on every push to main, or by hand (Actions → Deploy to Cloudflare → Run workflow).
+# Order matters: database first, then workers (the Pages apps bind to them), then Pages.
+name: Deploy to Cloudflare
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'agent/**']
+  workflow_dispatch:
+    inputs:
+      target:
+        description: What to deploy
+        type: choice
+        options: [all, workers, pages]
+        default: all
+      seed_fitness:
+        description: Load foods + exercises (first deploy; skipped automatically if already loaded)
+        type: boolean
+        default: false
+
+# Never run two deploys at once; never cancel one half-way through a migration.
+concurrency:
+  group: cloudflare-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+jobs:
+  # ── 1. Type-check, unit tests, build both apps ───────────────────────────
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            admin-app/package-lock.json
+            member-app/package-lock.json
+
+      - name: Install
+        run: |
+          npm ci --prefix server
+          npm ci --prefix admin-app
+          npm ci --prefix member-app
+
+      - name: Server — type-check + unit tests
+        working-directory: server
+        run: |
+          npx tsc --noEmit -p .
+          npx vitest run
+
+      - name: Build admin app
+        run: npm run build --prefix admin-app
+      - name: Build member app
+        run: npm run build --prefix member-app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: |
+            admin-app/dist
+            member-app/dist
+          retention-days: 7
+
+  # ── 2. Database + Workers ────────────────────────────────────────────────
+  workers:
+    needs: check
+    if: inputs.target != 'pages'          # also true on push (inputs is empty)
+    runs-on: ubuntu-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: server
+    env:
+      D1_DATABASE_ID: ${{ vars.D1_DATABASE_ID }}
+      VAPID_PUBLIC: ${{ vars.VAPID_PUBLIC }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+
+      - name: Check required settings
+        run: |
+          missing=0
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID D1_DATABASE_ID; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set (see DEPLOY.md step 3)"; missing=1; fi
+          done
+          exit $missing
+
+      # The repo is public, so the D1 id lives in a GitHub variable, not in git.
+      - name: Fill in D1 database id
+        run: |
+          sed -i "s/REPLACE_WITH_D1_DATABASE_ID/${D1_DATABASE_ID}/" wrangler.device.toml wrangler.admin.toml wrangler.member.toml
+          grep -q "$D1_DATABASE_ID" wrangler.device.toml
+
+      - name: Create R2 bucket if missing (photos, payment proofs, gym content)
+        run: |
+          if ! npx wrangler r2 bucket list | grep -q "challenge-gym-files"; then
+            npx wrangler r2 bucket create challenge-gym-files
+          fi
+
+      - name: Restore point (D1 Time Travel bookmark)
+        continue-on-error: true
+        run: npx wrangler d1 time-travel info challenge-gym -c wrangler.device.toml
+
+      - name: Apply D1 migrations
+        run: npx wrangler d1 migrations apply challenge-gym --remote -c wrangler.device.toml
+
+      - name: Load foods + exercises (first deploy only)
+        if: inputs.seed_fitness
+        run: |
+          n=$(npx wrangler d1 execute challenge-gym --remote -c wrangler.device.toml --json \
+                --command "SELECT COUNT(*) AS n FROM exercises" | jq '.[0].results[0].n')
+          if [ "$n" = "0" ]; then npm run db:fitness:remote; else echo "Already loaded ($n exercises) — skipping."; fi
+
+      - name: Deploy device worker (X990 ADMS + agent API + cron)
+        run: npx wrangler deploy -c wrangler.device.toml
+
+      - name: Deploy admin API worker
+        run: |
+          args=(); [ -n "$VAPID_PUBLIC" ] && args=(--var "VAPID_PUBLIC:$VAPID_PUBLIC")
+          npx wrangler deploy -c wrangler.admin.toml "${args[@]}"
+
+      - name: Deploy member API worker
+        run: |
+          args=(); [ -n "$VAPID_PUBLIC" ] && args=(--var "VAPID_PUBLIC:$VAPID_PUBLIC")
+          npx wrangler deploy -c wrangler.member.toml "${args[@]}"
+
+      # Secrets are pushed on every run so GitHub is the single source of truth.
+      # Empty ones are skipped, so an unset secret never wipes a value set by hand.
+      - name: Sync worker secrets
+        env:
+          ADMIN_JWT_SECRET: ${{ secrets.ADMIN_JWT_SECRET }}
+          MEMBER_JWT_SECRET: ${{ secrets.MEMBER_JWT_SECRET }}
+          SETUP_TOKEN: ${{ secrets.SETUP_TOKEN }}
+          AGENT_TOKEN: ${{ secrets.AGENT_TOKEN }}
+          VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
+        run: |
+          if [ -n "$ADMIN_JWT_SECRET" ] && [ "$ADMIN_JWT_SECRET" = "$MEMBER_JWT_SECRET" ]; then
+            echo "::error::ADMIN_JWT_SECRET and MEMBER_JWT_SECRET must be different"; exit 1
+          fi
+          push() { # $1 = toml, rest = NAME=VALUE pairs
+            local toml=$1; shift
+            jq -n '$ARGS.named | with_entries(select(.value != ""))' "$@" > "$RUNNER_TEMP/s.json"
+            if [ "$(jq length "$RUNNER_TEMP/s.json")" -gt 0 ]; then npx wrangler secret bulk "$RUNNER_TEMP/s.json" -c "$toml"; fi
+            rm -f "$RUNNER_TEMP/s.json"
+          }
+          push wrangler.admin.toml  --arg JWT_SECRET "$ADMIN_JWT_SECRET" --arg SETUP_TOKEN "$SETUP_TOKEN" --arg VAPID_PRIVATE "$VAPID_PRIVATE"
+          push wrangler.member.toml --arg JWT_SECRET "$MEMBER_JWT_SECRET"
+          push wrangler.device.toml --arg AGENT_TOKEN "$AGENT_TOKEN"
+
+  # ── 3. Pages apps (static site + /api proxy function) ───────────────────
+  pages:
+    needs: [check, workers]
+    if: >-
+      always() && needs.check.result == 'success' &&
+      (needs.workers.result == 'success' || needs.workers.result == 'skipped') &&
+      inputs.target != 'workers'
+    runs-on: ubuntu-latest
+    environment: production
+    strategy:
+      matrix:
+        app: [admin, member]
+    defaults:
+      run:
+        working-directory: ${{ matrix.app }}-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Install wrangler (same version as the workers)
+        run: npm ci --prefix ../server
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: .
+          # restores admin-app/dist and member-app/dist at the repo root
+
+      - name: Create Pages project if missing
+        working-directory: server
+        run: |
+          name=challenge-gym-${{ matrix.app }}
+          if ! npx wrangler pages project list | grep -q "$name"; then
+            npx wrangler pages project create "$name" --production-branch main
+          fi
+
+      # wrangler.toml in the app folder adds the service binding to the API worker;
+      # functions/api/[[path]].ts is bundled automatically.
+      - name: Deploy ${{ matrix.app }} app
+        run: >-
+          ../server/node_modules/.bin/wrangler pages deploy dist
+          --project-name challenge-gym-${{ matrix.app }}
+          --branch main
+          --commit-hash ${{ github.sha }}
+          --commit-dirty=true

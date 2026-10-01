@@ -7,6 +7,9 @@ import { addDays, addMonths, offsetSuffix, today as todayOf } from '../../lib/da
 import { listMembers } from '../../lib/members';
 import { planReconcile, reconcile, syncMember } from '../../device/queue';
 import { createTerm } from '../../lib/terms';
+import { cachedView } from '../../lib/viewCache';
+import { pushConfigured } from '../../lib/content';
+import { renderReminder, renewalTargets, sendRenewalReminders } from '../../lib/renewalPush';
 
 export const ops = new Hono<AppEnv>();
 ops.use('*', requireAdmin());
@@ -14,7 +17,10 @@ ops.use('*', requireAdmin());
 const todayFor = (c: { env: AppEnv['Bindings'] }) => todayOf(tzOffset(c.env));
 
 // ── Dashboard ───────────────────────────────────────────────────────────
-ops.get('/dashboard', async (c) => {
+// Cached 30 s (and cleared by any admin write): the dashboard is opened far more often than data changes.
+ops.get('/dashboard', async (c) => c.json(await cachedView(c.env, `dashboard:${todayFor(c)}`, 30_000, () => dashboardData(c))));
+
+async function dashboardData(c: { env: AppEnv['Bindings'] }) {
   const today = todayFor(c);
   const month = today.slice(0, 7);
   const year = today.slice(0, 4);
@@ -40,7 +46,16 @@ ops.get('/dashboard', async (c) => {
     device_unsynced: count((m) => !m.device_in_sync),
   };
 
-  const [money, monthly, newByMonth, visits, hourly, recentPayments, pendingClaims, device, queue, agent, followupsDue] = await Promise.all([
+  // New members per month come from the list already in memory (the SQL form read ~1.3k rows per load).
+  const newByMonth: { ym: string; n: number }[] = [];
+  for (const m of list) {
+    const ym = (m.join_date ?? '').slice(0, 7);
+    if (ym < from12.slice(0, 7)) continue;
+    const row = newByMonth.find((r) => r.ym === ym);
+    if (row) row.n++; else newByMonth.push({ ym, n: 1 });
+  }
+
+  const [money, monthly, visits, hourly, recentPayments, pendingClaims, device, queue, agent, followupsDue] = await Promise.all([
     first<Record<string, number>>(c.env.DB,
       `SELECT COALESCE(SUM(CASE WHEN paid_on=? THEN amount END),0) AS today,
               COALESCE(SUM(CASE WHEN substr(paid_on,1,7)=? THEN amount END),0) AS month,
@@ -52,8 +67,6 @@ ops.get('/dashboard', async (c) => {
       `SELECT substr(paid_on,1,7) AS ym, COUNT(*) AS payments, SUM(amount) AS revenue,
               SUM(CASE WHEN entry_type='renewal' THEN 1 ELSE 0 END) AS renewals
        FROM payments WHERE status='confirmed' AND paid_on >= ? GROUP BY ym ORDER BY ym`, from12),
-    all<{ ym: string; n: number }>(c.env.DB,
-      `SELECT substr(join_date,1,7) AS ym, COUNT(*) AS n FROM members WHERE archived=0 AND join_date >= ? GROUP BY ym`, from12),
     all<{ day: string; visitors: number }>(c.env.DB,
       `SELECT day, COUNT(DISTINCT essl_id) AS visitors FROM attendance WHERE day >= ? GROUP BY day ORDER BY day`, addDays(today, -13)),
     all<{ hour: string; n: number }>(c.env.DB,
@@ -87,13 +100,13 @@ ops.get('/dashboard', async (c) => {
      WHERE a.day=? AND m.is_staff=0 AND m.access_override IS NOT 'allow'
        AND COALESCE((SELECT MAX(end_date) FROM memberships ms WHERE ms.member_id=m.id AND ms.status='active'),'0000') < ?`, today, today);
 
-  return c.json({
+  return {
     today, members, money, pending_claims: pendingClaims, months, due_soon: dueSoon,
     attendance: { today: todayVisits, last14: visits, hourly, expired_but_entered: deniedToday },
     recent_payments: recentPayments, followups_due: followupsDue?.n ?? 0,
     device: { ...(device ?? {}), queue, agent },
-  });
-});
+  };
+}
 
 // ── Renewals & follow-up worklist ───────────────────────────────────────
 ops.get('/renewals', async (c) => {
@@ -256,6 +269,11 @@ ops.get('/payments/:id/receipt', async (c) => {
 // ── Attendance ──────────────────────────────────────────────────────────
 ops.get('/attendance', async (c) => {
   const day = isDateOrNull(c.req.query('date')) ?? todayFor(c);
+  // Today's list refreshes within 20 s (members are scanning in); past days hardly change (1 h).
+  return c.json(await cachedView(c.env, `attendance:${day}`, day === todayFor(c) ? 20_000 : 3_600_000, () => attendanceDay(c, day)));
+});
+
+async function attendanceDay(c: { env: AppEnv['Bindings'] }, day: string) {
   const s = await getSettings(c.env.DB);
   // Match by device ID at read time (punches may predate the member record), and fall back to
   // the device roster / eTimeTrack name for staff and people who are not members in the app.
@@ -270,13 +288,15 @@ ops.get('/attendance', async (c) => {
      LEFT JOIN etimetrack_employees et ON et.code=a.essl_id
      WHERE a.day=? GROUP BY a.essl_id ORDER BY first_in DESC`, day);
   const staff = (id: string) => s.access.staff_prefixes.some((p) => id.toUpperCase().startsWith(p.toUpperCase()));
-  return c.json({ date: day, visitors: rows.length, rows: rows.map((r) => ({ ...r, is_staff: r.is_staff ?? (staff(r.essl_id) ? 1 : 0) })) });
-});
+  return { date: day, visitors: rows.length, rows: rows.map((r) => ({ ...r, is_staff: r.is_staff ?? (staff(r.essl_id) ? 1 : 0) })) };
+}
 
 ops.get('/attendance/report', async (c) => {
   const today = todayFor(c);
   const from = isDateOrNull(c.req.query('from')) ?? addDays(today, -29);
   const to = isDateOrNull(c.req.query('to')) ?? today;
+  // 30-day statistics: 5 min of staleness is invisible here, and saves thousands of rows per open.
+  return c.json(await cachedView(c.env, `attendance-report:${from}:${to}`, 300_000, async () => {
   const [daily, top, inactive] = await Promise.all([
     all(c.env.DB, `SELECT day, COUNT(DISTINCT essl_id) AS visitors, COUNT(*) AS punches FROM attendance WHERE day BETWEEN ? AND ? GROUP BY day ORDER BY day`, from, to),
     all(c.env.DB, `SELECT m.id, m.name, m.essl_id, COUNT(DISTINCT a.day) AS days FROM attendance a JOIN members m ON m.id=a.member_id
@@ -286,7 +306,8 @@ ops.get('/attendance/report', async (c) => {
                    WHERE m.archived=0 AND m.is_staff=0 AND cm.end_date >= ?
                      AND COALESCE((SELECT MAX(day) FROM attendance a WHERE a.member_id=m.id),'0000') < ? ORDER BY last_visit LIMIT 50`, today, addDays(today, -10)),
   ]);
-  return c.json({ from, to, daily, top, inactive_active_members: inactive });
+  return { from, to, daily, top, inactive_active_members: inactive };
+  }));
 });
 
 ops.post('/attendance/manual', async (c) => {
@@ -354,6 +375,20 @@ ops.put('/settings/:key', requireAdmin('owner', 'admin'), async (c) => {
     case 'reminders':
       value = { near_days: Math.min(90, Math.max(1, int(b.near_days) ?? 30)), soon_days: Math.min(30, Math.max(1, int(b.soon_days) ?? 7)) };
       break;
+    case 'renewal_push': {
+      const title = str(b.title, 120) ?? cur.renewal_push.title;
+      const message = str(b.message, 300) ?? cur.renewal_push.message;
+      value = {
+        enabled: typeof b.enabled === 'boolean' ? b.enabled : cur.renewal_push.enabled,
+        days_before: Math.min(30, Math.max(1, int(b.days_before) ?? cur.renewal_push.days_before)),
+        send_hour: Math.min(23, Math.max(0, int(b.send_hour) ?? cur.renewal_push.send_hour)),
+        title, message,
+        motivation: Array.isArray(b.motivation)
+          ? b.motivation.map((x: unknown) => str(x, 160)).filter((x: string | null): x is string => !!x).slice(0, 30)
+          : cur.renewal_push.motivation,
+      };
+      break;
+    }
     case 'receipt':
       assert(c.get('session').role === 'owner', 403, 'Only the owner can change receipt numbering');
       value = { prefix: (str(b.prefix, 8) ?? 'CG').toUpperCase(), next: Math.max(1, int(b.next) ?? cur.receipt.next) };
@@ -370,6 +405,31 @@ ops.put('/settings/:key', requireAdmin('owner', 'admin'), async (c) => {
   }
   await audit(c.env, actor(c), 'settings.update', 'settings', key, value);
   return c.json({ ok: true, value });
+});
+
+// ── Renewal reminders (phone push) ──────────────────────────────────────
+/** Who would get today's reminder, and what it looks like. */
+ops.get('/renewal-push', async (c) => {
+  const s = await getSettings(c.env.DB);
+  const today = todayFor(c);
+  const targets = await renewalTargets(c.env, s.renewal_push, today);
+  const members = [...new Map(targets.map((t) => [t.member_id, t])).values()].sort((a, b) => a.end_date.localeCompare(b.end_date));
+  const sample = members[0] ?? { name: 'Ravi Kumar', end_date: addDays(today, Math.min(3, s.renewal_push.days_before)) };
+  return c.json({
+    push_ready: pushConfigured(c.env),
+    log: s.renewal_push_log,
+    due_today: members.slice(0, 50).map((m) => ({ member_id: m.member_id, name: m.name, end_date: m.end_date })),
+    due_count: members.length,
+    preview: renderReminder(s.renewal_push, s.gym.name, sample, today),
+  });
+});
+
+/** Send today's reminders now (members already reminded today are skipped). */
+ops.post('/renewal-push/send', requireAdmin('owner', 'admin'), async (c) => {
+  const r = await sendRenewalReminders(c.env, { force: true });
+  assert(!('skipped' in r), 400, `Not sent: ${'skipped' in r ? r.skipped : ''}`);
+  await audit(c.env, actor(c), 'renewal_push.send', 'settings', 'renewal_push', r);
+  return c.json(r);
 });
 
 ops.get('/audit', requireAdmin('owner', 'admin'), async (c) =>
@@ -414,7 +474,9 @@ ops.get('/files/*', async (c) => {
   assert(/^(photos|proofs)\/[\w.\-]+$/.test(key), 400, 'Bad file key');
   const obj = await c.env.FILES!.get(key);
   assert(obj, 404, 'File not found');
-  return new Response(obj.body, { headers: { 'Content-Type': obj.httpMetadata?.contentType ?? 'application/octet-stream', 'Cache-Control': 'private, max-age=3600' } });
+  // Every upload gets a new key, so a stored file never changes: let the browser keep it.
+  return new Response(obj.body, { headers: { 'Content-Type': obj.httpMetadata?.contentType ?? 'application/octet-stream',
+    'Cache-Control': key.startsWith('photos/') ? 'private, max-age=2592000, immutable' : 'private, max-age=3600' } });
 });
 
 // ── Access preview (what auto-enforce would do right now) ───────────────

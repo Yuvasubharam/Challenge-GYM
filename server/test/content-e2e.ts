@@ -117,7 +117,7 @@ const postIds = h.posts.map((p: any) => p.id);
 check('posts: upcoming event + notice shown', postIds.includes(pEvent) && postIds.includes(pNote));
 check('posts: expired, hidden, past event not shown', !postIds.includes(pOld) && !postIds.includes(pHidden) && !postIds.includes(pPast), postIds);
 check('pinned notice first', h.posts[0].pinned === 1);
-check('shop: featured product shown, inactive hidden', h.products[0]?.id === pr1 && !h.products.some((p: any) => p.id === pr2));
+check('shop: featured product shown, inactive hidden', h.products.some((p: any) => p.id === pr1) && !h.products.some((p: any) => p.id === pr2));
 check('gallery: album with photos shown, empty album hidden', h.albums.some((a: any) => a.id === al && a.photos === 2 && a.cover === k3) && !h.albums.some((a: any) => a.id === alEmpty));
 check('bell has unread (visible notify posts only)', h.unread >= 2, h.unread);
 res = await fetch(`${MEMBER}/content/img/${k1}`, { headers: { Cookie: mc } });

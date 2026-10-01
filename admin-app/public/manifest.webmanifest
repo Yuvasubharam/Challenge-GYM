@@ -2,13 +2,44 @@
   "name": "Challenge Gym Admin",
   "short_name": "CG Admin",
   "description": "Members, renewals, payments, attendance and door access for Challenge Gym.",
+  "id": "/",
   "start_url": "/",
+  "display_override": ["standalone"],
   "scope": "/",
   "display": "standalone",
   "orientation": "any",
   "background_color": "#0E0F11",
   "theme_color": "#0E0F11",
   "icons": [
-    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+    {
+      "src": "/favicon-32.png",
+      "sizes": "32x32",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/favicon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/favicon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/splash-logo.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
   ]
 }

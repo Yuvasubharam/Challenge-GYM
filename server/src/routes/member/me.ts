@@ -1,6 +1,7 @@
 // Member self-service API. Every query is scoped to the signed-in member (session.mid);
 // there is no route that takes another member's id.
 import { Hono } from 'hono';
+import { storeMemberPhoto } from '../../lib/memberPhoto';
 import type { AppEnv } from '../../env';
 import { tzOffset } from '../../env';
 import { requireMember } from '../../lib/auth';
@@ -193,20 +194,7 @@ me.put('/proof', async (c) => {
   return c.json({ proof_key: key });
 });
 
-me.put('/photo', async (c) => {
-  assert(c.env.FILES, 503, 'Uploads are not available right now');
-  const type = c.req.header('content-type') ?? '';
-  assert(/^image\/(jpeg|png|webp)$/.test(type), 400, 'Upload a JPEG, PNG or WebP image');
-  const buf = await c.req.arrayBuffer();
-  assert(buf.byteLength > 0 && buf.byteLength <= 3_000_000, 413, 'Photo must be under 3 MB');
-  const id = mid(c);
-  const key = `photos/member-${id}-${Date.now()}`;
-  await c.env.FILES!.put(key, buf, { httpMetadata: { contentType: type } });
-  const old = await first<{ photo_key: string | null }>(c.env.DB, `SELECT photo_key FROM members WHERE id=?`, id);
-  await run(c.env.DB, `UPDATE members SET photo_key=?, updated_at=? WHERE id=?`, key, nowIso(), id);
-  if (old?.photo_key) await c.env.FILES!.delete(old.photo_key);
-  return c.json({ photo_key: key });
-});
+me.put('/photo', async (c) => c.json({ photo_key: await storeMemberPhoto(c.env, mid(c), c.req.raw) }));
 
 /** Own photo only. */
 me.get('/photo', async (c) => {

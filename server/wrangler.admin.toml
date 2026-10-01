@@ -4,6 +4,10 @@ main = "src/workers/admin.ts"
 compatibility_date = "2024-12-01"
 workers_dev = false          # no public URL; only the admin Pages app can call it
 
+# Hourly: daily renewal reminders to member phones (sent once, at/after the hour set in Settings).
+[triggers]
+crons = ["0 * * * *"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "challenge-gym"

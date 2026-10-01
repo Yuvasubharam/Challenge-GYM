@@ -1,14 +1,16 @@
-import { useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
-  ArchiveRestore, ArrowLeft, Ban, Camera, CheckCircle2, Cpu, KeyRound, MessageCircle, MoreHorizontal, Pencil, Phone, Printer,
+  ArchiveRestore, ArrowLeft, Ban, CheckCircle2, FileSignature, Cpu, KeyRound, MessageCircle, MoreHorizontal, Pencil, Phone, Printer,
   RefreshCw, Smartphone, Snowflake, Trash2, Wallet, Activity,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { ago, date, daysLeftLabel, money, time, todayLocal, waLink } from '../lib/format';
 import type { DeviceCommand, MemberSummary, Membership, Payment } from '../lib/types';
-import { Avatar, Confirm, ErrorBox, Field, Modal, PageLoader, Ring, Segmented, Spinner, StatusBadge, useAction, useLoad } from '../components/ui';
+import { Confirm, ErrorBox, Field, Modal, PageLoader, Ring, Segmented, Spinner, StatusBadge, useAction, useLoad, useToast } from '../components/ui';
 import { PaymentModal, RenewModal } from '../components/MemberForms';
+import { EditableAvatar } from '../components/PhotoCapture';
+import { ConsentCard, ConsentModal, type StoredConsent } from '../components/Consent';
 import { useSession } from '../lib/session';
 
 interface Detail {
@@ -19,11 +21,25 @@ interface Detail {
   attendance: { day: string; first_in: string; last_out: string; punches: number }[];
   followups: { id: number; call_date: string; status: string; priority: string; remarks: string | null; next_date: string | null; handled_by: string }[];
   commands: DeviceCommand[];
-  account: { id: number; active: number; last_login_at: string | null } | null;
+  account: { id: number; active: number; last_login_at: string | null; must_change_password: number } | null;
   device: { essl_id: string; name: string; privilege: number; fp_count: number | null; on_device: number; templates_backed_up: number; seen_at: string } | null;
+  consent: StoredConsent | null;
 }
 
 type Tab = 'plans' | 'payments' | 'attendance' | 'fitness' | 'followups' | 'device';
+
+type CommandOutcome = { status: string; result: string | null };
+/** Poll a device command until the X990 answers; gives up after ~45 s (device offline → it stays queued). */
+async function waitForCommand(cmdId: number, timeoutMs = 45_000): Promise<CommandOutcome> {
+  const until = Date.now() + timeoutMs;
+  let last: CommandOutcome = { status: 'pending', result: null };
+  while (Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 2000));
+    last = await api.get<CommandOutcome>(`/device/commands/${cmdId}`);
+    if (last.status !== 'pending' && last.status !== 'sent') return last;
+  }
+  return last;
+}
 
 export default function MemberDetail() {
   const { id } = useParams();
@@ -31,8 +47,18 @@ export default function MemberDetail() {
   const { can } = useSession();
   const { data: d, error, reload } = useLoad(() => api.get<Detail>(`/members/${id}`), [id]);
   const [tab, setTab] = useState<Tab>('plans');
-  const [modal, setModal] = useState<null | 'renew' | 'pay' | 'edit' | 'freeze' | 'password' | 'archive' | 'followup' | 'menu'>(null);
+  const [modal, setModal] = useState<null | 'renew' | 'pay' | 'edit' | 'freeze' | 'password' | 'archive' | 'delete' | 'consent' | 'followup' | 'menu'>(null);
   const { busy, run } = useAction();
+  const toast = useToast();
+  const [syncing, setSyncing] = useState(false);
+  const [params, setParams] = useSearchParams();
+  // Straight after "Add member": open the consent for signing (?consent=1), once.
+  const askConsent = params.get('consent') === '1';
+  useEffect(() => {
+    if (!askConsent || !d) return;
+    if (!d.consent && !d.summary.is_staff) setModal('consent');
+    setParams((p) => { p.delete('consent'); return p; }, { replace: true });
+  }, [askConsent, d, setParams]);
 
   if (error) return <ErrorBox error={error} onRetry={reload} />;
   if (!d) return <PageLoader />;
@@ -45,14 +71,30 @@ export default function MemberDetail() {
   const ringPct = s.status === 'staff' ? 100 : s.pct_elapsed === null ? 0 : 100 - s.pct_elapsed;
   const tone = s.status === 'expired' ? 'bad' : s.status === 'expiring' ? 'warn' : 'lime';
 
-  const setAccess = (override: 'allow' | 'deny' | null) =>
-    run(() => api.post(`/members/${id}/access`, { override }), override === 'deny' ? 'Access blocked — device updating' : override === 'allow' ? 'Access allowed — device updating' : 'Following membership again').then(reload);
-
-  const uploadPhoto = async (file?: File) => {
-    if (!file) return;
-    await run(() => api.upload(`/members/${id}/photo`, file), 'Photo updated');
-    void reload();
+  // Access changes go straight to the door device; wait for its answer (usually 1–10 s over ADMS)
+  // so the admin sees whether it actually applied instead of a "doesn't match — Sync now" banner.
+  const pushToDevice = async (post: () => Promise<{ device_command: number | null }>, label: string) => {
+    const r = await run(post);
+    if (r) await reportDevice(r.device_command, label);
   };
+  const reportDevice = async (cmd: number | null, label: string) => {
+    if (!cmd) { toast('ok', `${label} — door device already up to date`); void reload(); return; }
+    setSyncing(true);
+    try {
+      const out = await waitForCommand(cmd);
+      if (out.status === 'done') toast('ok', `${label} — door device updated`);
+      else if (out.status === 'failed' || out.status === 'cancelled') toast('error', `Door device did not apply it: ${out.result ?? out.status}. Try "Sync now".`);
+      else toast('error', 'Door device has not confirmed yet (offline?). It will apply automatically when it reconnects.');
+    } catch (e) {
+      toast('error', (e as Error).message);
+    } finally {
+      setSyncing(false);
+      void reload();
+    }
+  };
+  const setAccess = (override: 'allow' | 'deny' | null) =>
+    pushToDevice(() => api.post(`/members/${id}/access`, { override }),
+      override === 'deny' ? 'Access blocked' : override === 'allow' ? 'Access allowed' : 'Following membership again');
 
   return (
     <>
@@ -63,11 +105,7 @@ export default function MemberDetail() {
         <div className="absolute -right-24 -bottom-24 w-72 h-72 rounded-full bg-lime/10 -z-10 pointer-events-none" />
         <div className="relative flex flex-col lg:flex-row gap-5 lg:items-center">
           <div className="flex items-center gap-4 flex-1 min-w-0">
-            <label className="relative cursor-pointer group shrink-0" title="Change photo">
-              <Avatar name={s.name} photo={s.photo_key} size={72} />
-              <span className="absolute inset-0 rounded-full bg-black/50 opacity-0 group-hover:opacity-100 flex items-center justify-center transition"><Camera className="w-5 h-5 text-white" /></span>
-              <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={(e) => uploadPhoto(e.target.files?.[0])} />
-            </label>
+            <EditableAvatar memberId={Number(id)} name={s.name} photo={s.photo_key} size={72} onChange={() => void reload()} />
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2"><h1 className="text-2xl sm:text-3xl font-bold text-white truncate">{s.name}</h1><StatusBadge status={s.status} /></div>
               <p className="text-ink-300 text-sm mt-1">ID <span className="font-mono text-white">{s.essl_id ?? '—'}</span> · {s.mobile ?? 'no mobile'} · joined {date(s.join_date)}</p>
@@ -103,12 +141,26 @@ export default function MemberDetail() {
         </div>
       </div>
 
-      {!s.device_in_sync && s.essl_id && (
+      {!d.consent && !s.is_staff && !m.archived && (
+        <div className="card card-pad mb-4 flex flex-wrap items-center gap-3 border-warn/40 dark:border-warn/40">
+          <FileSignature className="w-5 h-5 text-warn shrink-0" />
+          <p className="text-sm flex-1">Risk consent not signed yet.</p>
+          <button className="btn btn-primary btn-sm" onClick={() => setModal('consent')}>Sign now</button>
+        </div>
+      )}
+      {d.consent && <ConsentCard consent={d.consent} name={s.name} onSign={() => setModal('consent')} />}
+
+      {syncing ? (
+        <div className="card card-pad mb-4 flex items-center gap-3">
+          <Spinner className="w-5 h-5 text-lime-700 dark:text-lime" />
+          <p className="text-sm flex-1">Updating the door device…</p>
+        </div>
+      ) : !s.device_in_sync && s.essl_id && (
         <div className="card card-pad mb-4 flex flex-wrap items-center gap-3 border-warn/40 dark:border-warn/40">
           <Cpu className="w-5 h-5 text-warn" />
           <p className="text-sm flex-1">Door device doesn't match the membership yet ({d.summary.access ? 'should be allowed' : 'should be blocked'}; device: {s.device_state}).
             {d.commands.some((c) => c.status === 'pending' || c.status === 'sent') ? ' A command is queued.' : ''}</p>
-          <button className="btn btn-outline btn-sm" disabled={busy} onClick={() => run(() => api.post(`/members/${id}/device-sync`), 'Device sync queued').then(reload)}>Sync now</button>
+          <button className="btn btn-outline btn-sm" disabled={busy} onClick={() => pushToDevice(() => api.post(`/members/${id}/device-sync`), 'Synced')}>Sync now</button>
         </div>
       )}
 
@@ -130,11 +182,13 @@ export default function MemberDetail() {
       {tab === 'followups' && <FollowupsTab d={d} onAdd={() => setModal('followup')} />}
       {tab === 'device' && <DeviceTab d={d} />}
 
-      <RenewModal open={modal === 'renew'} onClose={close} onDone={done} memberId={Number(id)} currentEnd={s.end_date} name={s.name} />
+      <RenewModal open={modal === 'renew'} onClose={close} memberId={Number(id)} currentEnd={s.end_date} name={s.name} override={s.access_override}
+        onDone={(r) => { close(); if (r) void reportDevice(r.device_command, r.override_cleared ? `Renewed, manual ${r.override_cleared === 'deny' ? 'block' : 'allow'} removed` : 'Renewed'); else void reload(); }} />
       <PaymentModal open={modal === 'pay'} onClose={close} onDone={(pid) => { done(); if (pid) window.open(`/receipt/${pid}`, '_blank'); }} memberId={Number(id)} due={s.due} name={s.name} />
       <EditModal open={modal === 'edit'} onClose={close} onDone={done} member={m} />
       <FreezeModal open={modal === 'freeze'} onClose={close} onDone={done} memberId={Number(id)} frozen={!!m.frozen_until} />
-      <PasswordModal open={modal === 'password'} onClose={close} memberId={Number(id)} account={d.account} />
+      <PasswordModal open={modal === 'password'} onClose={() => { close(); void reload(); }} memberId={Number(id)} account={d.account} esslId={s.essl_id} />
+      <ConsentModal open={modal === 'consent'} onClose={close} onSigned={done} memberId={Number(id)} name={s.name} />
       <FollowupModal open={modal === 'followup'} onClose={close} onDone={done} memberId={Number(id)} />
       <Confirm open={modal === 'archive'} onClose={close} danger busy={busy} confirmLabel={m.archived ? 'Restore' : 'Archive member'}
         title={m.archived ? 'Restore member?' : 'Archive this member?'}
@@ -142,6 +196,8 @@ export default function MemberDetail() {
           <>They will be removed from the door device and hidden from lists. Payments and attendance history are kept. Fingerprints stay backed up, so restoring later needs no re-enrolment.</>}
         onConfirm={() => run(() => (m.archived ? api.post(`/members/${id}/restore`) : api.del(`/members/${id}`)),
           m.archived ? 'Member restored' : 'Member archived').then(done)} />
+
+      {modal === 'delete' && <DeleteModal memberId={Number(id)} onClose={close} onDeleted={() => nav('/members', { replace: true })} />}
 
       <Modal open={modal === 'menu'} onClose={close} title="More actions">
         <div className="grid gap-2">
@@ -155,8 +211,10 @@ export default function MemberDetail() {
             hint={s.app_access ? 'Blocks the diet/workout app and signs them out' : 'Allow the member app again'}
             danger={!!s.app_access} onClick={() => { close(); void run(() => api.post(`/members/${id}/app-access`, { enabled: !s.app_access }), s.app_access ? 'Member app turned off' : 'Member app turned on').then(reload); }} />}
           {can('owner', 'admin') && <MenuItem icon={<KeyRound />} label={d.account ? 'Reset member app password' : 'Create member app login'} onClick={() => setModal('password')} />}
+          <MenuItem icon={<FileSignature />} label={d.consent ? 'Sign risk consent again' : 'Sign risk consent'} hint="English · తెలుగు · हिन्दी" onClick={() => setModal('consent')} />
           <MenuItem icon={<MessageCircle />} label="Log a follow-up call" onClick={() => setModal('followup')} />
           {can('owner', 'admin') && <MenuItem icon={m.archived ? <ArchiveRestore /> : <Trash2 />} danger={!m.archived} label={m.archived ? 'Restore member' : 'Archive member'} onClick={() => setModal('archive')} />}
+          {can('owner') && <MenuItem icon={<Trash2 />} danger label="Delete permanently" hint="Lead lost for good: erase all data and free the device ID" onClick={() => setModal('delete')} />}
         </div>
       </Modal>
     </>
@@ -376,15 +434,67 @@ function FreezeModal({ open, onClose, onDone, memberId, frozen }: { open: boolea
   );
 }
 
-function PasswordModal({ open, onClose, memberId, account }: { open: boolean; onClose: () => void; memberId: number; account: Detail['account'] }) {
+/** Forgotten password: back to the member ID (default) or a password the desk chooses; the member sets their own on next sign-in. */
+function PasswordModal({ open, onClose, memberId, account, esslId }: { open: boolean; onClose: () => void; memberId: number; account: Detail['account']; esslId: string | null }) {
   const { busy, run } = useAction();
   const [pw, setPw] = useState('');
+  const reset = (body: object, ok: string) => run(() => api.post(`/members/${memberId}/reset-password`, body), ok).then((r) => { if (r) { setPw(''); onClose(); } });
   return (
     <Modal open={open} onClose={onClose} title={account ? 'Reset member app password' : 'Create member app login'}
+      footer={<button className="btn btn-outline" onClick={onClose}>Close</button>}>
+      <div className="space-y-4">
+        <p className="text-sm muted">
+          {account ? <>Last sign-in: <b>{account.last_login_at ? ago(account.last_login_at) : 'never'}</b>{account.must_change_password ? ' · still on a temporary password' : ''}. </> : null}
+          The member signs in with their member ID or mobile, and must choose their own password right after.
+        </p>
+        {esslId && (
+          <div className="rounded-2xl bg-lime/10 border border-lime/30 p-4">
+            <p className="text-sm">Reset to the default — user ID <b className="font-mono">{esslId}</b>, password <b className="font-mono">{esslId}</b></p>
+            <button className="btn btn-primary w-full mt-3" disabled={busy}
+              onClick={() => void reset({ to_default: true }, `Password reset — tell the member to sign in with ${esslId} / ${esslId}`)}>Reset to member ID</button>
+          </div>
+        )}
+        <div>
+          <Field label={esslId ? 'Or set a temporary password (min 6)' : 'Temporary password (min 6)'}>
+            <input className="input" value={pw} onChange={(e) => setPw(e.target.value)} autoComplete="off" />
+          </Field>
+          <button className="btn btn-outline w-full mt-3" disabled={busy || pw.length < 6}
+            onClick={() => void reset({ password: pw }, 'Password set — share it with the member')}>Set this password</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+interface DeletePreview { name: string; essl_id: string | null; archived: boolean; pin_shared: boolean; plans: number; payments: number; paid: number; visits: number; fingerprints: number }
+
+function DeleteModal({ memberId, onClose, onDeleted }: { memberId: number; onClose: () => void; onDeleted: () => void }) {
+  const { busy, run } = useAction();
+  const { data: p, error } = useLoad(() => api.get<DeletePreview>(`/members/${memberId}/delete-preview`), [memberId]);
+  const [typed, setTyped] = useState('');
+  const expect = p ? (p.essl_id ?? p.name) : '';
+  const ok = !!p && typed.trim().toUpperCase() === expect.trim().toUpperCase();
+  const del = () => run(() => api.del<{ device_command: number | null }>(`/members/${memberId}/permanent`, { confirm: typed }),
+    p?.essl_id && !p.pin_shared ? `Deleted — removing ID ${p.essl_id} from the door device` : 'Member deleted').then((r) => { if (r) onDeleted(); });
+  return (
+    <Modal open onClose={onClose} title="Delete member permanently?"
       footer={<><button className="btn btn-outline" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" disabled={busy || pw.length < 6} onClick={() => run(() => api.post(`/members/${memberId}/reset-password`, { password: pw }), 'Password set — share it with the member').then((r) => { if (r) { setPw(''); onClose(); } })}>Set password</button></>}>
-      <p className="text-sm muted mb-3">{account ? `Last sign-in: ${account.last_login_at ? ago(account.last_login_at) : 'never'}.` : 'Members can also activate themselves with their mobile + member ID.'} They sign in with their mobile or member ID.</p>
-      <Field label="New password (min 6)"><input className="input" value={pw} onChange={(e) => setPw(e.target.value)} autoComplete="off" /></Field>
+        <button className="btn bg-bad text-white hover:bg-red-600" disabled={busy || !ok} onClick={() => void del()}>{busy && <Spinner className="w-4 h-4" />}Delete forever</button></>}>
+      {error ? <ErrorBox error={error} /> : !p ? <div className="py-6 flex justify-center"><Spinner /></div> : (
+        <div className="space-y-4 text-sm">
+          <p>This <b>cannot be undone</b>. Use it only when {p.name} is gone for good — otherwise <b>Archive</b> keeps their history.</p>
+          <ul className="rounded-2xl bg-bad/10 p-4 space-y-1.5">
+            <li>• Profile, member app login and fitness logs</li>
+            <li>• {p.plans} plan{p.plans === 1 ? '' : 's'} and {p.payments} payment{p.payments === 1 ? '' : 's'} ({money(p.paid)}) — <b>removed from revenue reports</b></li>
+            <li>• {p.visits} attendance record{p.visits === 1 ? '' : 's'}</li>
+            {p.essl_id && !p.pin_shared && <li>• User {p.essl_id} deleted from the door device{p.fingerprints ? ` with ${p.fingerprints} backed-up fingerprint${p.fingerprints === 1 ? '' : 's'}` : ''} — the ID is free for a new member</li>}
+          </ul>
+          {p.pin_shared && <p className="text-warn">ID {p.essl_id} now belongs to another member, so the door device and that member's data are left untouched.</p>}
+          <Field label={p.essl_id ? `Type the member ID (${p.essl_id}) to confirm` : `Type the name (${p.name}) to confirm`}>
+            <input className="input" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" autoFocus />
+          </Field>
+        </div>
+      )}
     </Modal>
   );
 }

@@ -6,6 +6,7 @@ import { requireMember } from '../../lib/auth';
 import { all, assert, first, int, run, str } from '../../lib/db';
 import { today as todayOf } from '../../lib/dates';
 import { serveContentImage } from '../../lib/content';
+import { reminderFor } from '../../lib/renewalPush';
 
 export const memberContent = new Hono<AppEnv>();
 memberContent.use('*', requireMember());
@@ -115,11 +116,15 @@ memberContent.post('/notifications/seen', async (c) => {
   return c.json({ ok: true });
 });
 
-/** Read by the service worker when a (payload-less) push arrives. */
+/**
+ * Read by the service worker when a (payload-less) push arrives: the newest thing pushed to this
+ * member — their own renewal reminder if it was sent after the latest announcement push.
+ */
 memberContent.get('/notifications/latest', async (c) => {
-  const p = await first<Record<string, unknown>>(c.env.DB,
-    `SELECT id, kind, title, body, image_key, cta_link FROM announcements WHERE published=1 AND notify=1 ORDER BY pushed_at IS NULL, pushed_at DESC, id DESC LIMIT 1`);
-  return c.json(p ?? null);
+  const p = await first<Record<string, unknown> & { pushed_at: string | null }>(c.env.DB,
+    `SELECT id, kind, title, body, image_key, cta_link, pushed_at FROM announcements WHERE published=1 AND notify=1 ORDER BY pushed_at IS NULL, pushed_at DESC, id DESC LIMIT 1`);
+  const reminder = await reminderFor(c.env, mid(c), p?.pushed_at ?? null);
+  return c.json(reminder ?? p ?? null);
 });
 
 // ── Phone push subscriptions ────────────────────────────────────────────

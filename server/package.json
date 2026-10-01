@@ -17,6 +17,9 @@
     "db:fitness:build": "node scripts/build-fitness-seed.mjs",
     "db:fitness:local": "node scripts/load-fitness-seed.mjs local",
     "db:fitness:remote": "node scripts/load-fitness-seed.mjs remote",
+    "db:foods:images": "node scripts/fetch-food-images.mjs",
+    "db:foods:local": "node scripts/load-fitness-seed.mjs local foods",
+    "db:foods:remote": "node scripts/load-fitness-seed.mjs remote foods",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
@@ -25,6 +28,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241218.0",
+    "sharp": "^0.33.5",
     "typescript": "~5.8.2",
     "vitest": "^2.1.8",
     "wrangler": "^3.99.0"

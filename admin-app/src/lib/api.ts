@@ -29,7 +29,7 @@ export const api = {
   post: <T>(p: string, b: unknown = {}) => request<T>('POST', p, b),
   put: <T>(p: string, b: unknown) => request<T>('PUT', p, b),
   patch: <T>(p: string, b: unknown) => request<T>('PATCH', p, b),
-  del: <T>(p: string) => request<T>('DELETE', p, {}), // JSON body: the API's CSRF check rejects non-JSON writes
+  del: <T>(p: string, b: unknown = {}) => request<T>('DELETE', p, b), // JSON body: the API's CSRF check rejects non-JSON writes
   upload: <T>(p: string, file: Blob) => request<T>('PUT', p, file),
 };
 

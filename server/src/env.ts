@@ -13,6 +13,7 @@ export interface Env {
   VAPID_PUBLIC?: string;        // admin + member workers: web-push public key (base64url, uncompressed P-256)
   VAPID_PRIVATE?: string;       // admin worker only: private scalar `d` (base64url) — secret
   VAPID_SUBJECT?: string;       // mailto: contact sent to push services
+  AI?: { run(model: string, input: Record<string, unknown>): Promise<unknown> }; // member worker: Workers AI (coach plans)
 }
 
 export type Role = 'owner' | 'admin' | 'staff' | 'member';

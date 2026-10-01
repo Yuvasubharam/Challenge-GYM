@@ -130,6 +130,9 @@ node test/adms-sim.mjs
 
 ## Deploy to Cloudflare
 
+**Use [DEPLOY.md](DEPLOY.md).** It covers the one-time setup and the GitHub Actions workflow that
+deploys on every push to `main`. The commands below are the manual equivalent.
+
 ```powershell
 cd "Challenge Gym\server"
 npx wrangler login
@@ -182,8 +185,14 @@ Admin → Device → *New agent token*, then on the gym PC:
 ```powershell
 cd "Challenge Gym\agent"; copy .env.example .env   # set CLOUD_URL + AGENT_TOKEN
 pip install -r requirements.txt
-python agent.py
+.\install_autostart.ps1          # starts hidden at every Windows logon; -Status / -Remove
 ```
+
+The agent finds the X990 by itself. It tries the last IP that worked, then scans this PC's local
+networks for port 4370 and accepts only serial `DEVICE_SN`. Whenever the PC is on the gym network
+it syncs automatically: queued commands, roster and fingerprint backup, punches, and eTimeTrack.
+Off the network it keeps quiet and looks again every minute. Admin → Device shows
+*PC agent: online · device found at …* or *device not on the network*.
 
 Outbound HTTPS only. It backs up all fingerprints, runs commands over TCP 4370 if the cloud link is
 down, uploads punches, and mirrors eTimeTrack Lite's employee list (read-only).

@@ -14,6 +14,10 @@ migrations_dir = "migrations"
 binding = "FILES"
 bucket_name = "challenge-gym-files"
 
+# Workers AI — AI coach diet/workout plans (src/lib/ai.ts). Local dev calls the real models (needs `wrangler login`).
+[ai]
+binding = "AI"
+
 [vars]
 GYM_TZ_OFFSET_MIN = "330"
 

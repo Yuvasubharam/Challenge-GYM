@@ -40,6 +40,14 @@ export default function Device() {
 
   const dev = d.devices.find((x) => x.approved) ?? d.devices[0];
   const agent = d.agents[0];
+  // What the agent reports about the device on its network (agent ≥ 1.1)
+  const agentInfo = (() => { try { return JSON.parse(agent?.info ?? '{}').agent ?? {}; } catch { return {}; } })() as
+    { version?: string; host?: string; device_status?: 'connected' | 'searching' | 'not_found'; device_ip?: string | null; scanned?: string[]; error?: string | null };
+  const agentOnline = !!agent && online(agent.last_seen_at, 3);
+  const agentLan = !agentOnline ? null
+    : agentInfo.device_status === 'connected' ? `device found at ${agentInfo.device_ip}`
+    : agentInfo.device_status === 'not_found' ? `device not on ${agentInfo.host ?? 'the PC'}'s network${agentInfo.scanned?.length ? ` (${agentInfo.scanned.join(', ')})` : ''}`
+    : agentInfo.device_status ? 'looking for the device…' : null;
   const enforce = settings.access.auto_enforce;
   const changes = [...d.pending_changes.block, ...d.pending_changes.unblock];
   const junk = d.orphans.filter((o) => /[\s=]|^_fixed_/.test(o.essl_id));
@@ -70,7 +78,7 @@ export default function Device() {
           </div>
           <div className="flex flex-wrap gap-4 mt-5 text-xs text-ink-300">
             <span className="flex items-center gap-1.5"><Cloud className="w-4 h-4" />Cloud (ADMS): {dev?.last_seen_via === 'adms' && online(dev?.last_seen_at) ? <b className="text-lime">connected</b> : 'not connected'}</span>
-            <span className="flex items-center gap-1.5"><Monitor className="w-4 h-4" />PC agent: {agent ? (online(agent.last_seen_at, 3) ? <b className="text-lime">online</b> : `last ${ago(agent.last_seen_at)}`) : 'not set up'}</span>
+            <span className="flex items-center gap-1.5"><Monitor className="w-4 h-4" />PC agent: {agent ? (agentOnline ? <><b className="text-lime">online</b>{agentLan && <span className={agentInfo.device_status === 'connected' ? '' : 'text-warn'}> · {agentLan}</span>}</> : `last ${ago(agent.last_seen_at)}`) : 'not set up'}</span>
             <span>Roster synced {ago(d.coverage.roster_at)}</span>
           </div>
         </div>

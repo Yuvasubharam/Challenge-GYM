@@ -1,8 +1,10 @@
 // Admin API worker — serves only the admin app (bound to it via a Pages service binding).
 // Device actions are written to D1 as intents; the device worker executes them.
 import { Hono } from 'hono';
-import type { AppEnv } from '../env';
+import type { AppEnv, Env } from '../env';
 import { HttpError } from '../lib/db';
+import { renewalCron } from '../lib/renewalPush';
+import { bumpAdminVersion } from '../lib/viewCache';
 import { auth } from '../routes/admin/auth';
 import { members } from '../routes/admin/members';
 import { ops } from '../routes/admin/ops';
@@ -21,6 +23,14 @@ app.use('*', async (c, next) => {
   if (!c.res.headers.get('Cache-Control')) c.header('Cache-Control', 'no-store');
   c.header('X-Content-Type-Options', 'nosniff');
   c.header('Referrer-Policy', 'same-origin');
+});
+
+// Any successful change made in the admin app clears the cached list/dashboard views everywhere.
+app.use('*', async (c, next) => {
+  await next();
+  const m = c.req.method;
+  // Awaited (not waitUntil) so the admin's very next page load already sees the new version.
+  if (m !== 'GET' && m !== 'HEAD' && c.res.status < 400 && !c.req.path.startsWith('/api/auth/')) await bumpAdminVersion(c.env);
 });
 
 // CSRF: state-changing requests must be JSON (browsers cannot send that cross-site without CORS).
@@ -54,4 +64,11 @@ app.onError((err, c) => {
 });
 app.notFound((c) => c.json({ error: 'Not found' }, 404));
 
-export default app;
+export default {
+  fetch: app.fetch,
+  // Hourly: the daily renewal reminder goes out on the first run at/after the configured hour.
+  // Runs here because only this worker holds the VAPID private key.
+  async scheduled(_evt: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(renewalCron(env).then((r) => console.log('renewal-push', JSON.stringify(r))));
+  },
+};

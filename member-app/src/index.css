@@ -3,7 +3,10 @@
 @tailwind utilities;
 
 @layer base {
-  html { -webkit-tap-highlight-color: transparent; }
+  /* App feel: no pull-to-refresh bounce, no double-tap zoom, no font inflation */
+  html { -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; overscroll-behavior-y: none; }
+  body { overscroll-behavior-y: none; min-height: 100dvh; }
+  a, button, [role='button'], input, select, textarea, label { touch-action: manipulation; }
   body {
     @apply bg-paper text-ink-900 font-sans antialiased dark:bg-ink-900 dark:text-ink-100;
     font-feature-settings: 'cv11', 'ss01';

@@ -5,6 +5,7 @@ import { api, qs } from '../lib/api';
 import { date as fmtDate, todayLocal } from '../lib/format';
 import { cap, type Day, type Exercise, type SetEntry } from '../lib/fit';
 import { useFit } from '../lib/fitctx';
+import CoachLink from '../components/CoachLink';
 import { ErrorBox, PageLoader, Sheet, Spinner, useAction, useLoad } from '../components/ui';
 import { Credits, DateStrip, ExercisePhoto, ExerciseVideo, Stepper } from '../components/fit-ui';
 
@@ -48,6 +49,7 @@ function LogView({ date, setDate, onAdd, onOpen }: { date: string; setDate: (d: 
 
   return (
     <>
+      <CoachLink kind="workout" />
       <DateStrip value={date} onChange={setDate} />
       {!d ? <PageLoader /> : <>
         <section className="grid grid-cols-3 gap-3">

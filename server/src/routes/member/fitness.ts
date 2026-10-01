@@ -7,10 +7,11 @@ import { requireMember } from '../../lib/auth';
 import { all, assert, first, int, nowIso, run, str } from '../../lib/db';
 import { addDays, diffDays, isDate, today as todayOf } from '../../lib/dates';
 import {
-  ACTIVITIES, GOALS, ageFromBirthYear, bmi, bmiCategory, dailyTargets, estimateMinutes, healthyWeightRange, kcalBurned, portion, round,
-  summarizeSets, type Activity, type Goal, type SetEntry, type Sex,
+  ACTIVITIES, GOALS, ageFromBirthYear, bmi, bmiCategory, dailyTargets, healthyWeightRange, round, type Activity, type Goal, type SetEntry, type Sex,
 } from '../../lib/fitness';
+import { logFood, logWorkout } from '../../lib/fitlog';
 import { serveExerciseMedia } from '../../lib/exerciseMedia';
+import { exerciseCatalog, FOOD_LIST_COLS, foodCatalog, strip, type ExRow, type FoodRow } from '../../lib/catalog';
 
 export const fit = new Hono<AppEnv>();
 
@@ -22,10 +23,10 @@ fit.get('/media/*', (c) => serveExerciseMedia(c.env, c.req.raw, decodeURICompone
 fit.use('*', requireMember());
 
 const mid = (c: { get: (k: 'session') => { mid: number | null } }) => c.get('session').mid!;
-const todayFor = (env: Env) => todayOf(tzOffset(env));
+export const todayFor = (env: Env) => todayOf(tzOffset(env));
 
 /** Dates a member may log for: today and the past year (no future). */
-function logDate(env: Env, v: unknown): string {
+export function logDate(env: Env, v: unknown): string {
   const today = todayFor(env);
   const d = typeof v === 'string' && isDate(v) ? v : today;
   assert(d <= today, 400, "You can't log for a future date");
@@ -33,14 +34,14 @@ function logDate(env: Env, v: unknown): string {
   return d;
 }
 
-interface Profile {
+export interface Profile {
   member_id: number; birth_year: number | null; height_cm: number | null; start_weight_kg: number | null; weight_kg: number | null;
   target_weight_kg: number | null; goal: Goal | null; activity: Activity | null; workouts_per_week: number | null; diet_pref: string | null;
   kcal_target: number | null; protein_g: number | null; carbs_g: number | null; fat_g: number | null; water_ml: number | null;
   custom_targets: number; onboarded_at: string | null;
 }
 
-async function loadProfile(env: Env, memberId: number) {
+export async function loadProfile(env: Env, memberId: number) {
   const p = await first<Profile>(env.DB, `SELECT * FROM fitness_profiles WHERE member_id=?`, memberId);
   const m = await first<{ gender: Sex; name: string }>(env.DB, `SELECT gender, name FROM members WHERE id=?`, memberId);
   return { p, sex: (m?.gender ?? null) as Sex };
@@ -135,8 +136,9 @@ fit.get('/day', async (c) => {
   const id = mid(c);
   const date = logDate(c.env, c.req.query('date'));
   const [food, workouts, water, weight, prof] = await Promise.all([
-    all<{ id: number; meal: string; food_id: number | null; name: string; grams: number; kcal: number; protein: number; carbs: number; fat: number }>(c.env.DB,
-      `SELECT id, meal, food_id, name, grams, kcal, protein, carbs, fat FROM food_logs WHERE member_id=? AND day=? ORDER BY id`, id, date),
+    all<{ id: number; meal: string; food_id: number | null; name: string; grams: number; kcal: number; protein: number; carbs: number; fat: number; image: string | null; has_recipe: number | null }>(c.env.DB,
+      `SELECT l.id, l.meal, l.food_id, l.name, l.grams, l.kcal, l.protein, l.carbs, l.fat, f.image, f.steps IS NOT NULL AS has_recipe
+       FROM food_logs l LEFT JOIN foods f ON f.id=l.food_id WHERE l.member_id=? AND l.day=? ORDER BY l.id`, id, date),
     all<{ id: number; exercise_id: string | null; name: string; sets: string | null; duration_min: number; kcal: number; volume_kg: number; best_e1rm: number | null; images: string | null; body_part: string | null; tracking: string | null }>(c.env.DB,
       `SELECT w.id, w.exercise_id, w.name, w.sets, w.duration_min, w.kcal, w.volume_kg, w.best_e1rm, e.images, e.body_part, e.tracking
        FROM workout_logs w LEFT JOIN exercises e ON e.id=w.exercise_id WHERE w.member_id=? AND w.day=? ORDER BY w.id`, id, date),
@@ -215,20 +217,44 @@ fit.get('/foods', async (c) => {
   const q = (c.req.query('q') ?? '').trim().slice(0, 60);
   const veg = c.req.query('veg'); // 'veg' → veg only, 'egg' → veg+egg
   const vegSql = veg === 'veg' ? `AND (veg='veg' OR veg IS NULL)` : veg === 'egg' ? `AND (veg IN ('veg','egg') OR veg IS NULL)` : '';
+  const vegOk = (v: string | null) => veg === 'veg' ? v === 'veg' || v == null : veg === 'egg' ? v === 'veg' || v === 'egg' || v == null : true;
+  // Shared foods come from the in-memory catalog (no D1 reads per keystroke);
+  // the member's own foods are a small indexed lookup.
+  const [shared, own] = await Promise.all([
+    foodCatalog(c.env),
+    all<FoodRow>(c.env.DB, `SELECT ${FOOD_LIST_COLS} FROM foods f WHERE f.owner_member_id=? AND f.active=1`, id)
+      .then((rows) => rows.map((r) => ({ ...r, _name: String(r.name).toLowerCase() }))),
+  ]);
   if (!q) {
     // Recent + popular when the search box is empty
     const recent = await all(c.env.DB,
-      `SELECT f.*, MAX(l.id) AS last FROM food_logs l JOIN foods f ON f.id=l.food_id WHERE l.member_id=? AND f.active=1 ${vegSql} GROUP BY f.id ORDER BY last DESC LIMIT 12`, id);
-    const popular = await all(c.env.DB, `SELECT * FROM foods WHERE active=1 AND owner_member_id IS NULL ${vegSql} ORDER BY uses DESC, source='basic' DESC, id LIMIT 20`);
+      `SELECT ${FOOD_LIST_COLS}, MAX(l.id) AS last FROM food_logs l JOIN foods f ON f.id=l.food_id WHERE l.member_id=? AND l.day >= ? AND f.active=1 ${vegSql} GROUP BY f.id ORDER BY last DESC LIMIT 12`,
+      id, addDays(todayFor(c.env), -60));
+    const popular = shared.filter((f) => vegOk(f.veg))
+      .sort((a, b) => b.uses - a.uses || Number(b.source === 'basic') - Number(a.source === 'basic') || a.id - b.id)
+      .slice(0, 20).map(strip);
     return c.json({ recent, results: popular });
   }
   const words = q.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 4);
-  const results = await all(c.env.DB,
-    `SELECT * FROM foods WHERE active=1 AND (owner_member_id IS NULL OR owner_member_id=?) ${vegSql}
-       AND ${words.map(() => `lower(name) LIKE ?`).join(' AND ')}
-     ORDER BY (lower(name) LIKE ?) DESC, owner_member_id IS NOT NULL DESC, source='basic' DESC, uses DESC, length(name) LIMIT 40`,
-    id, ...words.map((w) => `%${w}%`), `${words[0]}%`);
+  const mine = new Set(own.map((f) => f.id));
+  const results = [...own, ...shared]
+    .filter((f) => vegOk(f.veg) && words.every((w) => f._name.includes(w)))
+    .sort((a, b) => Number(b._name.startsWith(words[0])) - Number(a._name.startsWith(words[0]))
+      || Number(mine.has(b.id)) - Number(mine.has(a.id))
+      || Number(b.source === 'basic') - Number(a.source === 'basic')
+      || b.uses - a.uses || a._name.length - b._name.length)
+    .slice(0, 40).map(strip);
   return c.json({ recent: [], results });
+});
+
+/** One food with its photo credit and recipe (ingredients + steps). 1 row read by primary key. */
+fit.get('/foods/:id', async (c) => {
+  const f = await first<Record<string, unknown> & { ingredients: string | null; steps: string | null }>(c.env.DB,
+    `SELECT id, name, kcal, protein, carbs, fat, fiber, sugar, sodium_mg, serving_g, serving_label, veg, source, owner_member_id,
+            image, image_credit, ingredients, steps, recipe_serves, recipe_min
+     FROM foods WHERE id=? AND active=1 AND (owner_member_id IS NULL OR owner_member_id=?)`, int(c.req.param('id')), mid(c));
+  assert(f, 404, 'Food not found');
+  return c.json({ ...f, ingredients: f.ingredients ? JSON.parse(f.ingredients) : [], steps: f.steps ? JSON.parse(f.steps) : [] });
 });
 
 /** Private custom food (per 100 g or per serving). */
@@ -253,18 +279,12 @@ fit.post('/food-logs', async (c) => {
   const b = await c.req.json();
   const id = mid(c);
   const date = logDate(c.env, b.date);
-  assert(['breakfast', 'lunch', 'dinner', 'snacks'].includes(b.meal), 400, 'Choose a meal');
-  const food = await first<{ id: number; name: string; kcal: number; protein: number; carbs: number; fat: number; serving_g: number }>(c.env.DB,
-    `SELECT id, name, kcal, protein, carbs, fat, serving_g FROM foods WHERE id=? AND active=1 AND (owner_member_id IS NULL OR owner_member_id=?)`, int(b.food_id), id);
-  assert(food, 404, 'Food not found');
-  const grams = b.grams !== undefined ? Number(b.grams) : Number(b.servings ?? 1) * food.serving_g;
-  assert(grams > 0 && grams <= 3000, 400, 'Enter a sensible amount');
-  const p = portion(food, grams);
-  const r = await first<{ id: number }>(c.env.DB,
-    `INSERT INTO food_logs (member_id, day, meal, food_id, name, grams, kcal, protein, carbs, fat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-    id, date, b.meal, food.id, food.name, round(grams, 1), p.kcal, p.protein, p.carbs, p.fat);
-  await run(c.env.DB, `UPDATE foods SET uses=uses+1 WHERE id=?`, food.id);
-  return c.json({ id: r!.id, ...p });
+  let grams = Number(b.grams);
+  if (b.grams === undefined) {
+    const f = await first<{ serving_g: number }>(c.env.DB, `SELECT serving_g FROM foods WHERE id=?`, int(b.food_id));
+    grams = Number(b.servings ?? 1) * (f?.serving_g ?? 100);
+  }
+  return c.json(await logFood(c.env, id, { date, meal: b.meal, foodId: int(b.food_id), grams }));
 });
 
 fit.delete('/food-logs/:id', async (c) => {
@@ -289,7 +309,7 @@ fit.post('/food-logs/copy', async (c) => {
 fit.put('/water', async (c) => {
   const b = await c.req.json();
   const date = logDate(c.env, b.date);
-  const ml = Math.max(0, Math.min(10000, int(b.ml) ?? 0));
+  const ml = Math.max(0, Math.min(5000, int(b.ml) ?? 0)); // 20 glasses max per day
   await run(c.env.DB, `INSERT INTO water_logs (member_id, day, ml) VALUES (?, ?, ?) ON CONFLICT(member_id, day) DO UPDATE SET ml=excluded.ml`, mid(c), date, ml);
   return c.json({ ml });
 });
@@ -320,59 +340,61 @@ fit.delete('/weight/:day', async (c) => {
 const EX_COLS = `id, name, body_part, target, equipment, category, level, images, met, tracking, popular`;
 const parseEx = <T extends { images?: string | null }>(r: T) => ({ ...r, images: r.images ? (JSON.parse(r.images) as string[]) : [] });
 
-/** Filters shared by the list and the facet counts. */
-function exerciseFilters(query: (k: string) => string | undefined, skip: string[] = []) {
-  const where: string[] = ['active=1'];
-  const params: unknown[] = [];
+/**
+ * Filters shared by the list and the facet counts, applied to the in-memory catalog
+ * (the library is read once per isolate instead of scanned on every request).
+ */
+function exerciseFilter(query: (k: string) => string | undefined, skip: string[] = []) {
   const val = (k: string) => (skip.includes(k) ? '' : (query(k) ?? '').trim());
-  const q = val('q').toLowerCase().slice(0, 60);
-  for (const w of q.split(/\s+/).filter(Boolean).slice(0, 4)) { where.push('(lower(name) LIKE ? OR lower(target) LIKE ?)'); params.push(`%${w}%`, `%${w}%`); }
-  for (const [k, col] of [['body', 'body_part'], ['target', 'target'], ['equipment', 'equipment'], ['level', 'level']] as const) {
-    const v = val(k);
-    if (v) { where.push(`${col}=?`); params.push(v); }
-  }
+  const words = val('q').toLowerCase().slice(0, 60).split(/\s+/).filter(Boolean).slice(0, 4);
+  const eq = ([['body', 'body_part'], ['target', 'target'], ['equipment', 'equipment'], ['level', 'level']] as const)
+    .map(([k, col]) => [col, val(k)] as const).filter(([, v]) => v);
   const type = val('type'); // strength | cardio | stretching | plyometrics
-  if (type === 'cardio') where.push(`(category='cardio' OR body_part='cardio')`);
-  else if (type) { where.push('category=?'); params.push(type); }
-  if (val('photos') === 'yes') where.push('images IS NOT NULL');
-  return { where, params, filtered: where.length > 1 };
+  const photos = val('photos') === 'yes';
+  const test = (e: ExRow) =>
+    words.every((w) => e._name.includes(w) || e._target.includes(w))
+    && eq.every(([col, v]) => e[col] === v)
+    && (!type || (type === 'cardio' ? e.category === 'cardio' || e.body_part === 'cardio' : e.category === type))
+    && (!photos || e.images != null);
+  return { test, filtered: words.length > 0 || eq.length > 0 || !!type || photos };
 }
+
+const countBy = (rows: ExRow[], key: (e: ExRow) => string | null, limit?: number) => {
+  const m = new Map<string, number>();
+  for (const e of rows) { const v = key(e); if (v) m.set(v, (m.get(v) ?? 0) + 1); }
+  return [...m].map(([value, n]) => ({ value, n })).sort((a, b) => b.n - a.n).slice(0, limit);
+};
+const exType = (e: ExRow) => (e.category === 'cardio' || e.body_part === 'cardio' ? 'cardio' : e.category);
+const byRank = (a: ExRow, b: ExRow) => b.popular - a.popular || Number(b.images != null) - Number(a.images != null)
+  || a.name.length - b.name.length || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 
 /**
  * Dropdown options with counts. Each list is computed with every *other* filter applied,
  * so e.g. choosing Chest narrows Muscle to pectorals/serratus and Equipment to what exists for chest.
  */
 fit.get('/exercises/facets', async (c) => {
+  const lib = await exerciseCatalog(c.env);
   const qf = (k: string) => c.req.query(k);
-  const facet = (col: string, skip: string) => {
-    const f = exerciseFilters(qf, [skip]);
-    return all<{ value: string; n: number }>(c.env.DB,
-      `SELECT ${col} AS value, COUNT(*) AS n FROM exercises WHERE ${f.where.join(' AND ')} AND ${col} IS NOT NULL AND ${col} <> '' GROUP BY ${col} ORDER BY n DESC`, ...f.params);
+  const facet = (key: (e: ExRow) => string | null, skip: string) => {
+    const { test } = exerciseFilter(qf, [skip]);
+    return countBy(lib.filter(test), key);
   };
-  const [body, target, equipment, level, type] = await Promise.all([
-    facet('body_part', 'body'), facet('target', 'target'), facet('equipment', 'equipment'), facet('level', 'level'),
-    facet(`CASE WHEN category='cardio' OR body_part='cardio' THEN 'cardio' ELSE category END`, 'type'),
-  ]);
-  return c.json({ body, target, equipment, level, type });
+  return c.json({
+    body: facet((e) => e.body_part, 'body'), target: facet((e) => e.target, 'target'),
+    equipment: facet((e) => e.equipment, 'equipment'), level: facet((e) => e.level, 'level'), type: facet(exType, 'type'),
+  });
 });
 
 fit.get('/exercises', async (c) => {
   const offset = Math.max(0, int(c.req.query('offset')) ?? 0);
-  const { where, params, filtered } = exerciseFilters((k) => c.req.query(k));
-  const onlyPopular = !filtered;
-  const rows = await all<{ images: string | null }>(c.env.DB,
-    `SELECT ${EX_COLS} FROM exercises WHERE ${where.join(' AND ')} ${onlyPopular ? 'AND popular=1' : ''}
-     ORDER BY popular DESC, images IS NOT NULL DESC, length(name), name LIMIT 40 OFFSET ?`, ...params, offset);
-  const facets = offset === 0 && onlyPopular
-    ? {
-        body_parts: await all(c.env.DB, `SELECT body_part AS value, COUNT(*) AS n FROM exercises WHERE active=1 GROUP BY body_part ORDER BY n DESC`),
-        equipment: await all(c.env.DB, `SELECT equipment AS value, COUNT(*) AS n FROM exercises WHERE active=1 GROUP BY equipment ORDER BY n DESC LIMIT 14`),
-      }
+  const catalog = await exerciseCatalog(c.env);
+  const { test, filtered } = exerciseFilter((k) => c.req.query(k));
+  const matches = catalog.filter((e) => test(e) && (filtered || e.popular === 1)).sort(byRank);
+  const rows = matches.slice(offset, offset + 40);
+  const facets = offset === 0 && !filtered
+    ? { body_parts: countBy(catalog, (e) => e.body_part), equipment: countBy(catalog, (e) => e.equipment, 14) }
     : null;
-  const total = offset === 0
-    ? (await first<{ n: number }>(c.env.DB, `SELECT COUNT(*) AS n FROM exercises WHERE ${where.join(' AND ')} ${onlyPopular ? 'AND popular=1' : ''}`, ...params))?.n ?? 0
-    : null;
-  return c.json({ results: rows.map(parseEx), facets, total, next: rows.length === 40 ? offset + 40 : null });
+  return c.json({ results: rows.map((r) => parseEx(strip(r))), facets, total: offset === 0 ? matches.length : null, next: rows.length === 40 ? offset + 40 : null });
 });
 
 fit.get('/exercises/:id', async (c) => {
@@ -397,22 +419,10 @@ fit.post('/workouts', async (c) => {
   const b = await c.req.json();
   const id = mid(c);
   const date = logDate(c.env, b.date);
-  const ex = await first<{ id: string; name: string; met: number; tracking: string }>(c.env.DB, `SELECT id, name, met, tracking FROM exercises WHERE id=?`, str(b.exercise_id, 120));
-  assert(ex, 404, 'Exercise not found');
   const sets: SetEntry[] = (Array.isArray(b.sets) ? b.sets : []).slice(0, 30)
     .map((s: { reps?: unknown; kg?: unknown }) => ({ reps: Math.max(0, Math.min(500, int(s.reps) ?? 0)), kg: Math.max(0, Math.min(500, round(Number(s.kg) || 0, 2))) }))
     .filter((s: SetEntry) => s.reps > 0);
-  let minutes = Number(b.duration_min);
-  if (!(minutes > 0)) minutes = ex.tracking === 'sets' ? estimateMinutes(sets) : 0;
-  assert(sets.length || minutes > 0, 400, ex.tracking === 'sets' ? 'Add at least one set' : 'Enter how many minutes');
-  assert(minutes <= 600, 400, 'Duration looks too long');
-  const weight = await first<{ weight_kg: number }>(c.env.DB, `SELECT weight_kg FROM weight_logs WHERE member_id=? AND day<=? ORDER BY day DESC LIMIT 1`, id, date);
-  const kcal = kcalBurned(ex.met, weight?.weight_kg ?? 70, minutes);
-  const s = summarizeSets(sets);
-  const r = await first<{ id: number }>(c.env.DB,
-    `INSERT INTO workout_logs (member_id, day, exercise_id, name, sets, duration_min, kcal, volume_kg, best_e1rm, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-    id, date, ex.id, ex.name, sets.length ? JSON.stringify(sets) : null, round(minutes, 1), kcal, s.volume, s.best_e1rm, str(b.notes, 300));
-  return c.json({ id: r!.id, kcal, duration_min: round(minutes, 1), volume_kg: s.volume, best_e1rm: s.best_e1rm });
+  return c.json(await logWorkout(c.env, id, { date, exerciseId: str(b.exercise_id, 120), sets, minutes: Number(b.duration_min), notes: b.notes }));
 });
 
 fit.delete('/workouts/:id', async (c) => {

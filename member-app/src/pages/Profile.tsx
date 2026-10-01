@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { useFit } from '../lib/fitctx';
 import { GOAL_LABEL } from '../lib/fit';
 import { api } from '../lib/api';
+import { processPhoto } from '../lib/photo';
 import { date } from '../lib/format';
 import { useHome } from '../lib/home';
 import { useSession, useTheme } from '../lib/session';
@@ -23,7 +24,8 @@ export default function Profile() {
 
   const upload = async (file?: File) => {
     if (!file) return;
-    const r = await run(() => api.upload('/me/photo', file), 'Photo updated');
+    // Cropped + resized to a small square WebP on the phone before upload (~30 KB instead of MBs).
+    const r = await run(async () => api.upload('/me/photo', await processPhoto(file)), 'Photo updated');
     if (r) { setPhotoV(Date.now()); void reload(); }
   };
 
@@ -37,7 +39,7 @@ export default function Profile() {
           <span className="absolute bottom-0 right-0 w-9 h-9 rounded-full bg-lime text-ink-900 flex items-center justify-center border-4 border-ink-900">
             {busy ? <Spinner className="w-4 h-4" /> : <Camera className="w-4 h-4" />}
           </span>
-          <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={(e) => upload(e.target.files?.[0])} />
+          <input type="file" accept="image/*" className="hidden" onChange={(e) => { void upload(e.target.files?.[0]); e.target.value = ''; }} />
         </label>
         <p className="font-display text-xl font-bold text-white mt-4">{m.name}</p>
         <p className="text-sm text-ink-300">Member ID <span className="font-mono text-lime">{m.essl_id ?? '—'}</span> · since {date(m.join_date)}</p>

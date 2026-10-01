@@ -1,13 +1,16 @@
 import { StrictMode, Suspense, lazy } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import './index.css';
+import './lib/install'; // capture the install prompt as early as possible
 import Layout from './components/Layout';
 import { PageLoader, ToastProvider } from './components/ui';
 import { SessionProvider, useSession } from './lib/session';
 import { HomeProvider } from './lib/home';
 import { FitProvider } from './lib/fitctx';
 import Welcome from './pages/Welcome';
+import AccountSetup from './pages/AccountSetup';
+import LaunchEvent from './pages/LaunchEvent';
 
 const Home = lazy(() => import('./pages/Home'));
 const Visits = lazy(() => import('./pages/Visits'));
@@ -20,45 +23,52 @@ const Receipt = lazy(() => import('./pages/Receipt'));
 const Shop = lazy(() => import('./pages/Shop'));
 const Gallery = lazy(() => import('./pages/Gallery'));
 const News = lazy(() => import('./pages/News'));
+const Coach = lazy(() => import('./pages/Coach'));
 
 function Gate() {
   const { session, loading } = useSession();
   if (loading) return <PageLoader />;
   if (!session) return <Welcome />;
+  if (session.must_change_password || session.needs_mobile) return <AccountSetup />;
   return (
     <HomeProvider>
       <FitProvider>
-      <Suspense fallback={<PageLoader />}>
-        <Routes>
-          <Route path="/receipt/:id" element={<Receipt />} />
-          <Route element={<Layout />}>
-            <Route index element={<Home />} />
-            <Route path="diet" element={<Diet />} />
-            <Route path="train" element={<Train />} />
-            <Route path="progress" element={<Progress />} />
-            <Route path="visits" element={<Visits />} />
-            <Route path="plan" element={<PlanPage />} />
-            <Route path="profile" element={<Profile />} />
-            <Route path="shop" element={<Shop />} />
-            <Route path="gallery" element={<Gallery />} />
-            <Route path="gallery/:id" element={<Gallery />} />
-            <Route path="news" element={<News />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Route>
-        </Routes>
-      </Suspense>
+        <Suspense fallback={<PageLoader />}>
+          <Routes>
+            <Route path="/receipt/:id" element={<Receipt />} />
+            <Route element={<Layout />}>
+              <Route index element={<Home />} />
+              <Route path="diet" element={<Diet />} />
+              <Route path="train" element={<Train />} />
+              <Route path="progress" element={<Progress />} />
+              <Route path="visits" element={<Visits />} />
+              <Route path="plan" element={<PlanPage />} />
+              <Route path="profile" element={<Profile />} />
+              <Route path="shop" element={<Shop />} />
+              <Route path="gallery" element={<Gallery />} />
+              <Route path="gallery/:id" element={<Gallery />} />
+              <Route path="news" element={<News />} />
+              <Route path="coach" element={<Coach />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Route>
+          </Routes>
+        </Suspense>
       </FitProvider>
     </HomeProvider>
   );
+}
+
+function AppRouter() {
+  const { pathname } = useLocation();
+  if (pathname === '/launch' || window.location.hostname === 'launch.challengegym.in') return <LaunchEvent />;
+  return <SessionProvider><Gate /></SessionProvider>;
 }
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>
       <ToastProvider>
-        <SessionProvider>
-          <Gate />
-        </SessionProvider>
+        <AppRouter />
       </ToastProvider>
     </BrowserRouter>
   </StrictMode>,

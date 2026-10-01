@@ -1,6 +1,8 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import { Dumbbell, Home as HomeIcon, Images, LineChart, Megaphone, ShoppingBag, UserRound, Utensils } from 'lucide-react';
 import type { ReactNode } from 'react';
+import PushPrompt from './PushPrompt';
+import InstallPrompt from './InstallPrompt';
 
 const NAV: { to: string; label: string; icon: ReactNode }[] = [
   { to: '/', label: 'Home', icon: <HomeIcon className="w-5 h-5" /> },
@@ -22,7 +24,7 @@ export default function Layout() {
       {/* Tablet rail / desktop sidebar */}
       <aside className="hidden md:flex fixed inset-y-0 left-0 z-40 flex-col md:w-24 lg:w-64 bg-ink-900 border-r border-ink-700 py-6 px-3">
         <div className="flex items-center gap-2.5 px-2 lg:px-3 mb-10 justify-center lg:justify-start">
-          <div className="w-10 h-10 rounded-2xl bg-lime text-ink-900 flex items-center justify-center shrink-0"><Dumbbell className="w-5 h-5" strokeWidth={2.5} /></div>
+          <img src="/favicon-128.png" alt="Challenge Gym logo" className="w-10 h-10 object-contain shrink-0 rounded-2xl bg-ink-950/70 p-1.5" />
           <span className="hidden lg:block font-display font-bold text-white">Challenge Gym</span>
         </div>
         <nav className="flex flex-col gap-1.5">
@@ -39,6 +41,9 @@ export default function Layout() {
       <main className="mx-auto max-w-3xl px-4 sm:px-6 pt-[max(env(safe-area-inset-top),1.25rem)] pb-32 md:pb-12 md:pt-10">
         <Outlet />
       </main>
+
+      <PushPrompt />
+      <InstallPrompt />
 
       {/* Phone: floating dark pill nav with lime active tab (reference design) */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 px-4 safe-bottom pointer-events-none">

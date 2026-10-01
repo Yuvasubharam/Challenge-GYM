@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { Dumbbell, Eye, EyeOff, ShieldCheck } from 'lucide-react';
+import { Eye, EyeOff, ShieldCheck } from 'lucide-react';
 import { api } from '../lib/api';
 import { useSession } from '../lib/session';
 import { Field, Spinner } from '../components/ui';
@@ -36,10 +36,13 @@ export default function Login() {
   return (
     <div className="min-h-dvh grid lg:grid-cols-2 bg-ink-900 text-white">
       <div className="hidden lg:flex relative overflow-hidden isolate flex-col justify-between p-12">
+        <div className="hidden lg:block absolute inset-0 opacity-10 pointer-events-none">
+          <img src="/logo-transparent.webp" alt="" className="absolute left-[240px] top-1/2 -translate-y-1/2 w-[520px] h-[520px] object-contain" />
+        </div>
         <div className="absolute -top-40 -left-40 w-[520px] h-[520px] rounded-full bg-lime/20 blur-3xl -z-10 pointer-events-none" />
         <div className="absolute bottom-0 right-0 w-[420px] h-[420px] rounded-full border-[60px] border-lime/10 translate-x-1/3 translate-y-1/3 -z-10 pointer-events-none" />
         <div className="relative flex items-center gap-3">
-          <div className="w-11 h-11 rounded-2xl bg-lime text-ink-900 flex items-center justify-center"><Dumbbell className="w-6 h-6" strokeWidth={2.5} /></div>
+          <img src="/favicon-128.png" alt="Challenge Gym logo" className="w-11 h-11 object-contain rounded-2xl bg-ink-950/70 p-1.5" />
           <span className="font-display font-bold text-xl">Challenge Gym</span>
         </div>
         <div className="relative">
@@ -52,7 +55,7 @@ export default function Login() {
       <div className="flex items-center justify-center p-6">
         <form onSubmit={submit} className="w-full max-w-sm">
           <div className="lg:hidden flex items-center gap-3 mb-10">
-            <div className="w-11 h-11 rounded-2xl bg-lime text-ink-900 flex items-center justify-center"><Dumbbell className="w-6 h-6" strokeWidth={2.5} /></div>
+            <img src="/favicon-128.png" alt="Challenge Gym logo" className="w-11 h-11 object-contain rounded-2xl bg-ink-950/70 p-1.5" />
             <span className="font-display font-bold text-xl">Challenge Gym</span>
           </div>
           <h2 className="text-3xl font-bold">{needsSetup ? 'Set up owner account' : 'Welcome back'}</h2>

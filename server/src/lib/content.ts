@@ -99,6 +99,12 @@ export async function pushBatch(env: Env, after: number, limit = 40): Promise<{ 
   assert(pushConfigured(env), 503, 'Phone notifications are not set up (VAPID keys missing)');
   const subs = await all<{ id: number; endpoint: string }>(env.DB, `SELECT id, endpoint FROM push_subscriptions WHERE id > ? ORDER BY id LIMIT ?`, after, limit);
   const total = (await all<{ n: number }>(env.DB, `SELECT COUNT(*) AS n FROM push_subscriptions`))[0]?.n ?? 0;
+  return { ...(await wakeSubscriptions(env, subs)), next: subs.length === limit ? subs[subs.length - 1].id : null, total };
+}
+
+/** Send a payload-less push to each subscription; drops ones the push service says are gone. */
+export async function wakeSubscriptions(env: Env, subs: { id: number; endpoint: string }[]): Promise<{ sent: number; failed: number; removed: number }> {
+  assert(pushConfigured(env), 503, 'Phone notifications are not set up (VAPID keys missing)');
   const jwts = new Map<string, string>();
   let sent = 0, failed = 0, removed = 0;
   await Promise.all(subs.map(async (s) => {
@@ -121,5 +127,5 @@ export async function pushBatch(env: Env, after: number, limit = 40): Promise<{ 
     }
   }));
   await run(env.DB, `DELETE FROM push_subscriptions WHERE fail_count >= 5`);
-  return { sent, failed, removed, next: subs.length === limit ? subs[subs.length - 1].id : null, total };
+  return { sent, failed, removed };
 }

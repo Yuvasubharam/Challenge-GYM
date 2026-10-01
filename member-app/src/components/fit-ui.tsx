@@ -11,20 +11,20 @@ export function DateStrip({ value, onChange }: { value: string; onChange: (d: st
   const today = todayLocal();
   const days = Array.from({ length: 7 }, (_, i) => shift(value > shift(today, -3) ? today : shift(value, 3), i - 6));
   return (
-    <div className="flex items-center gap-1.5">
-      <button className="icon-btn shrink-0" onClick={() => onChange(shift(value, -1))} aria-label="Previous day"><ChevronLeft className="w-5 h-5" /></button>
-      <div className="flex-1 grid grid-cols-7 gap-1.5">
+    <div className="flex items-center gap-1 sm:gap-1.5">
+      <button className="icon-btn shrink-0 w-8 sm:w-10" onClick={() => onChange(shift(value, -1))} aria-label="Previous day"><ChevronLeft className="w-5 h-5" /></button>
+      <div className="flex-1 min-w-0 grid grid-cols-7 gap-1 sm:gap-1.5">
         {days.map((d) => {
           const on = d === value;
           return (
-            <button key={d} onClick={() => onChange(d)} className={`rounded-2xl py-2 flex flex-col items-center transition ${on ? 'bg-lime text-ink-900' : 'hover:bg-black/5 dark:hover:bg-white/5'}`}>
-              <span className={`text-[10px] font-semibold ${on ? 'text-ink-700' : 'muted'}`}>{d === today ? 'Today' : DOW[new Date(d + 'T00:00:00Z').getUTCDay()]}</span>
+            <button key={d} onClick={() => onChange(d)} className={`min-w-0 rounded-2xl py-2 flex flex-col items-center transition ${on ? 'bg-lime text-ink-900' : 'hover:bg-black/5 dark:hover:bg-white/5'}`}>
+              <span className={`text-[10px] font-semibold tracking-tight ${on ? 'text-ink-700' : 'muted'}`}>{d === today ? 'Today' : DOW[new Date(d + 'T00:00:00Z').getUTCDay()]}</span>
               <span className="font-display font-bold text-lg leading-tight">{Number(d.slice(8))}</span>
             </button>
           );
         })}
       </div>
-      <button className="icon-btn shrink-0 disabled:opacity-30" disabled={value >= today} onClick={() => onChange(shift(value, 1))} aria-label="Next day"><ChevronRight className="w-5 h-5" /></button>
+      <button className="icon-btn shrink-0 w-8 sm:w-10 disabled:opacity-30" disabled={value >= today} onClick={() => onChange(shift(value, 1))} aria-label="Next day"><ChevronRight className="w-5 h-5" /></button>
     </div>
   );
 }
@@ -34,8 +34,9 @@ export function MacroBar({ label, value, target, color }: { label: string; value
   const over = !!target && value > target * 1.05;
   return (
     <div>
-      <div className="flex justify-between text-xs mb-1"><span className="font-semibold">{label}</span>
-        <span className={over ? 'text-warn font-semibold' : 'muted'}>{Math.round(value)}{target ? ` / ${target}` : ''} g</span></div>
+      {/* Label and amount wrap as whole units, so narrow phones never split "151 g" or glue "Protein0". */}
+      <div className="flex flex-wrap justify-between gap-x-2 text-xs mb-1"><span className="font-semibold">{label}</span>
+        <span className={`whitespace-nowrap ${over ? 'text-warn font-semibold' : 'muted'}`}>{Math.round(value)}{target ? ` / ${target}` : ''} g</span></div>
       <div className="h-2 rounded-full bg-black/5 dark:bg-white/10 overflow-hidden"><div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} /></div>
     </div>
   );

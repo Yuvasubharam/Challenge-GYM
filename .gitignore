@@ -14,3 +14,9 @@ __pycache__/
 *.csv
 # Downloaded dataset cache (scripts/build-fitness-seed.mjs re-downloads it)
 server/seed/data/cache/
+agent/agent_state.json
+agent/agent.log*
+.prod.vars
+server/wrangler.prod.toml
+server/.staff-logins.csv
+server/wrangler.prod*.toml

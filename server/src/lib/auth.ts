@@ -7,10 +7,13 @@ import { first, nowIso, run } from './db';
 // Each app has its own cookie and its own JWT secret (per worker) and an `aud` claim, so a
 // member session can never be replayed against the admin API and vice versa.
 const COOKIE = { admin: 'cg_admin', member: 'cg_member' } as const;
-const TTL = { admin: 60 * 60 * 12, member: 60 * 60 * 24 * 30 } as const;
+// Members stay signed in until they sign out: the cookie is renewed once a day while the app is used,
+// so only a member who leaves the app unused for 400 days (the browser cookie maximum) is signed out.
+const TTL = { admin: 60 * 60 * 12, member: 60 * 60 * 24 * 400 } as const;
+const RENEW_AFTER_SEC = 60 * 60 * 24;
 
-export async function startSession(c: Context<AppEnv>, s: Omit<Session, 'aud'>, aud: Session['aud']) {
-  const token = await signToken({ ...s, aud }, c.env.JWT_SECRET, TTL[aud]);
+async function setSessionCookie(c: Context<AppEnv>, s: Omit<Session, 'aud'>, aud: Session['aud']) {
+  const token = await signToken({ aid: s.aid, role: s.role, mid: s.mid, name: s.name, aud }, c.env.JWT_SECRET, TTL[aud]);
   setCookie(c, COOKIE[aud], token, {
     httpOnly: true,
     secure: new URL(c.req.url).protocol === 'https:',
@@ -18,6 +21,10 @@ export async function startSession(c: Context<AppEnv>, s: Omit<Session, 'aud'>, 
     path: '/',
     maxAge: TTL[aud],
   });
+}
+
+export async function startSession(c: Context<AppEnv>, s: Omit<Session, 'aud'>, aud: Session['aud']) {
+  await setSessionCookie(c, s, aud);
   await run(c.env.DB, 'UPDATE accounts SET last_login_at=? WHERE id=?', nowIso(), s.aid);
 }
 
@@ -62,6 +69,9 @@ export function requireMember(): MiddlewareHandler<AppEnv> {
       return c.json({ error: APP_DISABLED, code: 'app_disabled' }, 403);
     }
     c.set('session', s);
+    // Sliding session: re-issue a fresh 400-day cookie at most once a day.
+    const iat = (s as Session & { iat?: number }).iat ?? 0;
+    if (Date.now() / 1000 - iat > RENEW_AFTER_SEC) await setSessionCookie(c, s, 'member');
     await next();
   };
 }

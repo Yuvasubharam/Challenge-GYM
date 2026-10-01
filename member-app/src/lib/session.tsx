@@ -1,7 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import { api, setUnauthorizedHandler } from './api';
 
-export interface Session { aid: number; mid: number; name: string; role: 'member' }
+export interface Session {
+  aid: number; mid: number; name: string; role: 'member'; essl_id: string | null;
+  /** First sign-in with the default (member ID) or a desk-set password. */
+  must_change_password: boolean;
+  needs_mobile: boolean;
+}
 
 interface Ctx { session: Session | null; loading: boolean; refresh: () => Promise<void>; logout: () => Promise<void> }
 const SessionCtx = createContext<Ctx>(null as unknown as Ctx);

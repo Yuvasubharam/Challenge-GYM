@@ -4,11 +4,11 @@ import { api } from '../lib/api';
 import { ago } from '../lib/format';
 import type { Settings as S } from '../lib/types';
 import { chunk, parseWorkbook, type Parsed } from '../lib/excelImport';
-import { ErrorBox, Field, Modal, PageLoader, Segmented, SectionTitle, Spinner, useAction, useLoad } from '../components/ui';
+import { ErrorBox, Field, Modal, PageLoader, Segmented, SectionTitle, Spinner, useAction, useLoad, useToast } from '../components/ui';
 import { PageHeader } from '../components/Layout';
 import { useSession } from '../lib/session';
 
-type Tab = 'gym' | 'access' | 'import' | 'staff' | 'account' | 'audit'; // announcements moved to /content
+type Tab = 'gym' | 'access' | 'push' | 'import' | 'staff' | 'account' | 'audit'; // announcements moved to /content
 
 export default function SettingsPage() {
   const { can } = useSession();
@@ -19,7 +19,8 @@ export default function SettingsPage() {
   const admin = can('owner', 'admin');
   const options: { value: Tab; label: string }[] = [
     { value: 'gym', label: 'Gym & UPI' },
-    ...(admin ? [{ value: 'access' as Tab, label: 'Access rules' }, { value: 'import' as Tab, label: 'Import Excel' }, { value: 'staff' as Tab, label: 'Staff logins' }] : []),
+    ...(admin ? [{ value: 'access' as Tab, label: 'Access rules' }, { value: 'push' as Tab, label: 'Renewal reminders' },
+      { value: 'import' as Tab, label: 'Import Excel' }, { value: 'staff' as Tab, label: 'Staff logins' }] : []),
     { value: 'account', label: 'My password' },
     ...(admin ? [{ value: 'audit' as Tab, label: 'Audit log' }] : []),
   ];
@@ -29,6 +30,7 @@ export default function SettingsPage() {
       <div className="mb-5"><Segmented value={tab} options={options} onChange={setTab} /></div>
       {tab === 'gym' && <GymTab s={data} onSaved={reload} readOnly={!admin} />}
       {tab === 'access' && <AccessTab s={data} onSaved={reload} />}
+      {tab === 'push' && <RenewalPushTab s={data} onSaved={reload} />}
       {tab === 'import' && <ImportTab />}
       {tab === 'staff' && <StaffTab />}
       {tab === 'account' && <AccountTab />}
@@ -102,6 +104,81 @@ function AccessTab({ s, onSaved }: { s: S; onSaved: () => void }) {
       <button className="btn btn-primary" disabled={busy} onClick={() => run(() => api.put('/settings/access', {
         grace_days: a.grace_days, staff_prefixes: a.prefixes.split(',').map((x) => x.trim()).filter(Boolean), auto_enforce: s.access.auto_enforce,
       }), 'Saved').then(onSaved)}>Save</button>
+    </div>
+  );
+}
+
+interface RenewalPushStatus {
+  push_ready: boolean;
+  log: S['renewal_push_log'];
+  due_today: { member_id: number; name: string; end_date: string }[];
+  due_count: number;
+  preview: { title: string; body: string };
+}
+
+const hourLabel = (h: number) => `${h % 12 || 12}:00 ${h < 12 ? 'AM' : 'PM'}`;
+
+function RenewalPushTab({ s, onSaved }: { s: S; onSaved: () => void }) {
+  const { busy, run } = useAction();
+  const toast = useToast();
+  const [f, setF] = useState({ ...s.renewal_push, lines: s.renewal_push.motivation.join('\n') });
+  const { data: st, reload } = useLoad(() => api.get<RenewalPushStatus>('/renewal-push'));
+  const body = () => ({ ...f, motivation: f.lines.split('\n').map((x) => x.trim()).filter(Boolean) });
+  const save = () => run(() => api.put('/settings/renewal_push', body()), 'Saved').then(() => { onSaved(); void reload(); });
+  const log = st?.log ?? s.renewal_push_log;
+  return (
+    <div className="grid gap-4 lg:grid-cols-5">
+      <div className="card card-pad space-y-4 lg:col-span-3 min-w-0">
+        <SectionTitle title="Renewal reminders on members' phones" />
+        <p className="text-sm muted -mt-2">Once a day, every member-app user whose membership ends within the window gets a phone notification with their days left, plus a motivational line that changes daily.</p>
+        <label className="flex items-center gap-3 rounded-2xl bg-black/[.03] dark:bg-white/[.04] p-4 cursor-pointer">
+          <input type="checkbox" className="w-5 h-5 accent-lime-600" checked={f.enabled} onChange={(e) => setF({ ...f, enabled: e.target.checked })} />
+          <span className="text-sm"><b>Send daily reminders</b><span className="block muted">{f.enabled ? `On — every day at ${hourLabel(f.send_hour)}` : 'Off'}</span></span>
+        </label>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Start reminding (days before end)" hint="1–30. 7 = daily from 7 days before until the last day.">
+            <input type="number" min={1} max={30} className="input" value={f.days_before} onChange={(e) => setF({ ...f, days_before: Number(e.target.value) })} /></Field>
+          <Field label="Send at">
+            <select className="input" value={f.send_hour} onChange={(e) => setF({ ...f, send_hour: Number(e.target.value) })}>
+              {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{hourLabel(h)}</option>)}
+            </select></Field>
+        </div>
+        <Field label="Title" hint="Placeholders: {name} {days} {when} {end_date} {gym} — {when} reads “in 5 days”, “tomorrow” or “today”.">
+          <input className="input" maxLength={120} value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} /></Field>
+        <Field label="Message">
+          <textarea className="input" rows={3} maxLength={300} value={f.message} onChange={(e) => setF({ ...f, message: e.target.value })} /></Field>
+        <Field label="Motivational lines (one per line)" hint="One line is added each day, rotating through the list.">
+          <textarea className="input" rows={6} value={f.lines} onChange={(e) => setF({ ...f, lines: e.target.value })} /></Field>
+        <button className="btn btn-primary" disabled={busy} onClick={save}>Save</button>
+      </div>
+
+      <div className="space-y-4 lg:col-span-2 min-w-0">
+        {st && !st.push_ready && <div className="card card-pad text-sm border-warn/40 dark:border-warn/40">Phone notifications are not set up on the server (VAPID keys missing), so nothing can be sent yet.</div>}
+        <div className="card card-pad space-y-3">
+          <SectionTitle title="Preview (saved settings)" />
+          <div className="rounded-2xl bg-ink-900 text-white p-4 flex gap-3">
+            <img src="/favicon-128.png" alt="" className="w-9 h-9 rounded-xl bg-ink-800 p-1 shrink-0" />
+            <div className="min-w-0 text-sm">
+              <p className="font-semibold">{st?.preview.title ?? '…'}</p>
+              <p className="text-ink-300 whitespace-pre-line mt-0.5">{st?.preview.body}</p>
+            </div>
+          </div>
+        </div>
+        <div className="card card-pad space-y-3">
+          <SectionTitle title="Today" action={<span className="text-xs muted">{st ? `${st.due_count} due` : ''}</span>} />
+          <p className="text-sm">{log.day ? <>Last sent <b>{ago(log.at)}</b> to {log.members} member{log.members === 1 ? '' : 's'} ({log.sent} phone{log.sent === 1 ? '' : 's'}{log.failed ? `, ${log.failed} failed` : ''}).</> : 'Not sent yet.'}</p>
+          {st && st.due_count > 0 ? (
+            <ul className="text-sm divide-y divide-paper-line dark:divide-ink-700 max-h-56 overflow-y-auto">
+              {st.due_today.map((m) => <li key={m.member_id} className="py-1.5 flex justify-between gap-3"><span className="truncate">{m.name}</span><span className="muted shrink-0">ends {m.end_date.slice(5)}</span></li>)}
+            </ul>
+          ) : st && <p className="text-sm muted">Nobody left to remind today — members need the app with notifications turned on, and a plan ending within {s.renewal_push.days_before} days.</p>}
+          <button className="btn btn-outline w-full" disabled={busy || !st?.push_ready || !st?.due_count}
+            onClick={() => run(() => api.post<{ run: { members: number; sent: number; failed: number } }>('/renewal-push/send')).then((r) => {
+              if (r) toast('ok', `Sent to ${r.run.members} member${r.run.members === 1 ? '' : 's'} (${r.run.sent} phone${r.run.sent === 1 ? '' : 's'}${r.run.failed ? `, ${r.run.failed} failed` : ''})`);
+              onSaved(); void reload();
+            })}>Send today's reminders now</button>
+        </div>
+      </div>
     </div>
   );
 }

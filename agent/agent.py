@@ -11,15 +11,26 @@ no port forwarding, no public IP.
   • Uploads new punches from the device (backfill / ADMS outage safety net).
   • Mirrors the eTimeTrack Lite employee roster (read-only) for reconciliation.
 
+Finds the X990 by itself: tries the last known IP, then scans the PC's local
+network for port 4370 and checks the serial number. When the PC is not on the
+gym network (e.g. a laptop at home) it waits quietly and syncs everything the
+moment the device is reachable again. install_autostart.ps1 starts it at logon.
+
 Config: agent/.env (see .env.example).  Run: python agent.py   (or --once for a single cycle)
 """
 from __future__ import annotations
 
 import base64
+import hashlib
+import ipaddress
+import json
 import logging
 import os
+import socket
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from logging.handlers import RotatingFileHandler
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -48,16 +59,39 @@ DEVICE_PASSWORD = int(os.environ.get("DEVICE_PASSWORD", "0"))
 COMMAND_POLL_SEC = int(os.environ.get("COMMAND_POLL_SEC", "15"))
 ATTENDANCE_EVERY_MIN = int(os.environ.get("ATTENDANCE_EVERY_MIN", "5"))
 ROSTER_EVERY_MIN = int(os.environ.get("ROSTER_EVERY_MIN", "30"))
+ROSTER_FORCE_HOURS = int(os.environ.get("ROSTER_FORCE_HOURS", "12"))  # upload an unchanged roster at least this often
 ETTL_EVERY_MIN = int(os.environ.get("ETTL_EVERY_MIN", "60"))
 ETTL_DB = os.environ.get("ETTL_DB", r"C:\Program Files (x86)\eSSL\eTimeTrackLite\eTimeTrackLite1.mdb")
 BACKFILL_DAYS = int(os.environ.get("BACKFILL_DAYS", "3"))  # first run: how far back to upload punches
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(Path(__file__).with_name("agent.log"), encoding="utf-8"), logging.StreamHandler()],
-)
+DEVICE_SN = os.environ.get("DEVICE_SN", "CUB7252100258")      # auto-discovery accepts only this device
+AUTO_DISCOVER = os.environ.get("AUTO_DISCOVER", "1") != "0"
+SCAN_EVERY_SEC = int(os.environ.get("SCAN_EVERY_SEC", "60"))   # how often to look while the device is away
+SCAN_SUBNETS = [s.strip() for s in os.environ.get("SCAN_SUBNETS", "").split(",") if s.strip()]  # extra, e.g. 192.168.1.0/24
+STATE_FILE = Path(__file__).with_name("agent_state.json")
+VERSION = "1.1"
+
+_handlers: list[logging.Handler] = [RotatingFileHandler(Path(__file__).with_name("agent.log"), maxBytes=2_000_000, backupCount=3, encoding="utf-8")]
+if sys.stdout is not None and sys.stdout.isatty():  # pythonw (auto-start) has no console
+    _handlers.append(logging.StreamHandler())
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=_handlers)
 log = logging.getLogger("agent")
+
+
+def load_state() -> dict:
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_state(**kw):
+    s = load_state()
+    s.update(kw)
+    try:
+        STATE_FILE.write_text(json.dumps(s, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 session = requests.Session()
 session.headers.update({"Authorization": f"Bearer {AGENT_TOKEN}", "User-Agent": "challenge-gym-agent/1.0"})
@@ -69,11 +103,136 @@ def api(path: str, body: dict | None = None, method: str = "POST") -> dict:
     return r.json()
 
 
+# ── Finding the device on the LAN ───────────────────────────────────────
+class Net:
+    """Where the device is right now. `ip` is None while it is not reachable from this PC."""
+    ip: str | None = None
+    sn: str | None = None
+    status = "searching"          # connected | searching | not_found
+    last_scan = 0.0
+    scanned: list[str] = []
+
+
+net = Net()
+
+
+def local_networks() -> list[ipaddress.IPv4Network]:
+    """/24 networks of this PC's private IPv4 addresses (+ SCAN_SUBNETS)."""
+    ips: set[str] = set()
+    try:  # primary interface (no packet is sent)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ips.add(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.add(info[4][0])
+    except OSError:
+        pass
+    nets: list[ipaddress.IPv4Network] = []
+    for ip in ips:
+        a = ipaddress.IPv4Address(ip)
+        if a.is_private and not a.is_loopback and not a.is_link_local:
+            n = ipaddress.IPv4Network(f"{ip}/24", strict=False)
+            if n not in nets:
+                nets.append(n)
+    for extra in SCAN_SUBNETS:
+        try:
+            n = ipaddress.IPv4Network(extra, strict=False)
+            if n.num_addresses <= 1024 and n not in nets:
+                nets.append(n)
+        except ValueError:
+            log.warning("ignoring bad SCAN_SUBNETS entry %r", extra)
+    return nets
+
+
+def port_open(ip: str, timeout: float = 0.4) -> bool:
+    try:
+        with socket.create_connection((ip, DEVICE_PORT), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def serial_at(ip: str) -> str | None:
+    """Serial number of the ZK device at ip, or None if it isn't one / is busy."""
+    try:
+        conn = ZK(ip, port=DEVICE_PORT, timeout=8, password=DEVICE_PASSWORD, force_udp=False, ommit_ping=True).connect()
+        try:
+            return str(conn.get_serialnumber()).strip()
+        finally:
+            conn.disconnect()
+    except Exception:
+        return None
+
+
+def accept(ip: str, sn: str | None) -> bool:
+    return bool(sn) and (not DEVICE_SN or sn == DEVICE_SN)
+
+
+def locate_device(force_scan: bool = False) -> str | None:
+    """Quick check of known IPs; full LAN scan at most every SCAN_EVERY_SEC."""
+    known = [ip for ip in dict.fromkeys([net.ip, load_state().get("device_ip"), DEVICE_IP]) if ip]
+    for ip in known:
+        if port_open(ip, 1.0):
+            sn = serial_at(ip)
+            if accept(ip, sn):
+                return found(ip, sn)
+            if sn:
+                log.info("ignoring other ZK device %s at %s (want %s)", sn, ip, DEVICE_SN)
+    if not AUTO_DISCOVER:
+        return lost()
+    if not force_scan and time.time() - net.last_scan < SCAN_EVERY_SEC:
+        return lost(scanned=False)
+    nets = local_networks()
+    net.last_scan = time.time()
+    net.scanned = [str(n) for n in nets]
+    hosts = [str(h) for n in nets for h in n.hosts() if str(h) not in known]
+    if not hosts:
+        return lost()
+    with ThreadPoolExecutor(max_workers=128) as pool:
+        candidates = [ip for ip, ok in zip(hosts, pool.map(port_open, hosts)) if ok]
+    for ip in candidates:
+        sn = serial_at(ip)
+        if accept(ip, sn):
+            return found(ip, sn)
+        if sn:
+            log.info("ignoring other ZK device %s at %s (want %s)", sn, ip, DEVICE_SN)
+    return lost()
+
+
+def found(ip: str, sn: str | None) -> str:
+    if net.ip != ip or net.status != "connected":
+        log.info("device %s found at %s", sn, ip)
+    if load_state().get("device_ip") != ip:
+        save_state(device_ip=ip, device_sn=sn)
+    net.ip, net.sn, net.status = ip, sn, "connected"
+    return ip
+
+
+def lost(scanned: bool = True) -> None:
+    was = net.status
+    if was == "connected":
+        log.warning("device no longer reachable — will keep looking every %ss", SCAN_EVERY_SEC)
+    net.ip = None
+    if scanned:
+        net.status = "not_found"
+        if was != "not_found":  # log once, not every minute
+            log.info("device not on this network (scanned %s)", ", ".join(net.scanned) or "no private network")
+    elif was == "connected":
+        net.status = "searching"
+    return None
+
+
 # ── Device ──────────────────────────────────────────────────────────────
 @contextmanager
 def device(write: bool = False):
     """One TCP session. For writes the device keypad is paused briefly (disable_device)."""
-    zk = ZK(DEVICE_IP, port=DEVICE_PORT, timeout=15, password=DEVICE_PASSWORD, force_udp=False, ommit_ping=True)
+    if not net.ip:
+        raise ConnectionError("device not on this network")
+    zk = ZK(net.ip, port=DEVICE_PORT, timeout=15, password=DEVICE_PASSWORD, force_udp=False, ommit_ping=True)
     conn = zk.connect()
     try:
         if write:
@@ -147,7 +306,7 @@ def execute(conn, cmd: dict, users) -> dict:
         return {"ok": True, "result": f"{len(tpls)} template(s) backed up", "templates": tpls}
 
     if action == "query_users":
-        sync_roster(conn)
+        sync_roster(conn, force=True)
         return {"ok": True, "result": "roster uploaded"}
 
     if action == "reboot":
@@ -189,10 +348,10 @@ def process_commands() -> int:
 def device_info(conn) -> dict:
     conn.read_sizes()
     return {"sn": conn.get_serialnumber(), "platform": conn.get_platform(), "firmware": conn.get_firmware_version(),
-            "ip": DEVICE_IP, "users": conn.users, "fingers": conn.fingers, "records": conn.records}
+            "ip": net.ip, "users": conn.users, "fingers": conn.fingers, "records": conn.records}
 
 
-def sync_roster(conn=None):
+def sync_roster(conn=None, force: bool = False):
     """Upload the full device user list + finger counts, and back up any missing templates."""
     def run(c):
         users = c.get_users()
@@ -203,9 +362,17 @@ def sync_roster(conn=None):
             u = by_uid.get(t.uid)
             if u:
                 counts[str(u.user_id)] = counts.get(str(u.user_id), 0) + 1
-        api("/device-users", {"complete": True, "users": [
-            {"pin": str(u.user_id), "name": u.name, "privilege": u.privilege, "card": str(u.card or ""),
-             "group": u.group_id or "", "fingers": counts.get(str(u.user_id), 0)} for u in users]})
+        roster = [{"pin": str(u.user_id), "name": u.name, "privilege": u.privilege, "card": str(u.card or ""),
+                   "group": u.group_id or "", "fingers": counts.get(str(u.user_id), 0)} for u in users]
+        # Uploading ~700 users costs ~1,400 database writes: skip it when nothing changed,
+        # but still refresh at least every ROSTER_FORCE_HOURS so the cloud copy can't drift.
+        digest = hashlib.sha256(json.dumps(roster, sort_keys=True).encode()).hexdigest()
+        st = load_state()
+        if not force and st.get("roster_hash") == digest and time.time() - st.get("roster_at", 0) < ROSTER_FORCE_HOURS * 3600:
+            log.info("roster unchanged (%d users) — skipped upload", len(users))
+            return
+        api("/device-users", {"complete": True, "users": roster})
+        save_state(roster_hash=digest, roster_at=time.time())
         missing = set(api("/templates/missing", method="GET").get("pins", []))
         batch = []
         for t in templates:
@@ -266,30 +433,90 @@ def sync_etimetrack():
 
 
 # ── Main loop ───────────────────────────────────────────────────────────
+def single_instance():
+    """Auto-start + a manual run must not both talk to the device."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 47990))
+        s.listen(1)
+    except OSError:
+        log.info("another agent is already running on this PC — exiting")
+        sys.exit(0)
+    return s  # keep a reference so the port stays held
+
+
+def read_device() -> dict:
+    """Connect to the known IP; if that fails (IP changed, PC moved), look for the device again."""
+    if net.ip:
+        try:
+            with device() as conn:
+                return device_info(conn)
+        except Exception as e:
+            log.info("device at %s did not answer (%s) — searching", net.ip, e)
+            net.ip = None
+    if locate_device():
+        try:
+            with device() as conn:
+                return device_info(conn)
+        except Exception as e:  # e.g. eTimeTrack is downloading and the device is busy
+            log.info("device found but busy: %s", e)
+            return {"error": str(e)}
+    return {}
+
+
 def main(once: bool = False):
     if not AGENT_TOKEN:
         sys.exit("AGENT_TOKEN missing — set it in agent/.env")
-    log.info("agent starting → cloud %s, device %s:%s", CLOUD_URL, DEVICE_IP, DEVICE_PORT)
+    _lock = single_instance()
+    log.info("agent %s starting → cloud %s, device serial %s (auto-discover %s)", VERSION, CLOUD_URL, DEVICE_SN, "on" if AUTO_DISCOVER else "off")
     next_att = next_roster = next_ettl = 0.0
-    info: dict = {}
+    connected_before = False
+    cloud_ok = True
+    net.last_scan = -SCAN_EVERY_SEC  # scan immediately on start
     while True:
         now = time.time()
+        info = read_device()
+        connected = net.status == "connected" and "sn" in info
+        if connected and not connected_before:
+            log.info("device on the network — running a full sync now")
+            next_att = next_roster = 0.0
+        connected_before = connected
+
         try:
-            try:
-                with device() as conn:
-                    info = device_info(conn)
-            except Exception as e:
-                info = {"error": str(e)}
-            hb = api("/heartbeat", {"device": info if "sn" in info else None, "agent": {"version": "1.0", "host": os.environ.get("COMPUTERNAME")}})
-            process_commands()
-            if now >= next_roster:
-                sync_roster(); next_roster = now + ROSTER_EVERY_MIN * 60
-            if now >= next_att:
-                sync_attendance(hb.get("last_punch")); next_att = now + ATTENDANCE_EVERY_MIN * 60
-            if now >= next_ettl:
-                sync_etimetrack(); next_ettl = now + ETTL_EVERY_MIN * 60
+            hb = api("/heartbeat", {"device": info if connected else None, "agent": {
+                "version": VERSION, "host": os.environ.get("COMPUTERNAME"), "device_status": net.status if not connected else "connected",
+                "device_ip": net.ip, "scanned": net.scanned, "error": info.get("error")}})
+            if not cloud_ok:
+                log.info("cloud reachable again")
+            cloud_ok = True
         except Exception as e:
-            log.error("cycle failed: %s", e)
+            if cloud_ok:
+                log.warning("cloud not reachable (%s) — will retry", e)
+            cloud_ok = False
+            hb = None
+
+        if hb is not None:
+            if connected:
+                try:
+                    process_commands()
+                except Exception as e:
+                    log.error("commands failed: %s", e)
+                if now >= next_roster:
+                    try:
+                        sync_roster(); next_roster = now + ROSTER_EVERY_MIN * 60
+                    except Exception as e:
+                        log.error("roster sync failed: %s", e); next_roster = now + 60
+                if now >= next_att:
+                    try:
+                        sync_attendance(hb.get("last_punch")); next_att = now + ATTENDANCE_EVERY_MIN * 60
+                    except Exception as e:
+                        log.error("attendance sync failed: %s", e); next_att = now + 60
+            if now >= next_ettl:  # local .mdb file — works even while the device is away
+                try:
+                    sync_etimetrack()
+                except Exception as e:
+                    log.error("eTimeTrack sync failed: %s", e)
+                next_ettl = now + ETTL_EVERY_MIN * 60
         if once:
             return
         time.sleep(COMMAND_POLL_SEC)

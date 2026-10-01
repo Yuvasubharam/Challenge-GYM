@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { Download, Search, ShieldAlert, UserPlus, Users } from 'lucide-react';
+import { Download, Search, ShieldAlert, Smartphone, UserPlus, Users } from 'lucide-react';
 import { api, qs } from '../lib/api';
-import { date, daysLeftLabel, money } from '../lib/format';
+import { ago, date, daysLeftLabel, money } from '../lib/format';
 import type { MemberSummary } from '../lib/types';
-import { Avatar, Empty, ErrorBox, PageLoader, Segmented, StatusBadge, useLoad } from '../components/ui';
+import { Empty, ErrorBox, PageLoader, Segmented, StatusBadge, useLoad } from '../components/ui';
 import { PageHeader } from '../components/Layout';
 import { AddMemberModal } from '../components/MemberForms';
+import { EditableAvatar } from '../components/PhotoCapture';
 import { useSession } from '../lib/session';
 
 const FILTERS = [
@@ -19,8 +20,17 @@ const FILTERS = [
   { value: 'none', label: 'No plan' },
   { value: 'staff', label: 'Staff' },
   { value: 'unsynced', label: 'Device out of sync' },
+  { value: 'app_users', label: 'App users' },
   { value: 'app_off', label: 'App off' },
+  { value: 'no_consent', label: 'No consent' },
 ];
+
+// Phone icon for members with a member-app account; tooltip says when they last signed in.
+const AppBadge = ({ m }: { m: MemberSummary }) => !m.app_user ? null : (
+  <span title={m.app_last_login ? `Member app · last login ${ago(m.app_last_login)}` : 'Member app account · never logged in'}>
+    <Smartphone className={`w-3.5 h-3.5 shrink-0 ${m.app_last_login ? 'text-lime-700 dark:text-lime' : 'muted'}`} />
+  </span>
+);
 
 const PAGE = 60;
 
@@ -39,7 +49,7 @@ export default function Members() {
   useEffect(() => setLimit(PAGE), [debounced, status, sort]);
 
   // Load everything once per filter; search runs locally for instant results at gym scale.
-  const { data, error, reload } = useLoad(() => api.get<{ total: number; members: MemberSummary[] }>(`/members${qs({ status, sort })}`), [status, sort]);
+  const { data, error, reload, setData } = useLoad(() => api.get<{ total: number; members: MemberSummary[] }>(`/members${qs({ status, sort })}`), [status, sort]);
 
   const list = useMemo(() => {
     const all = data?.members ?? [];
@@ -48,6 +58,8 @@ export default function Members() {
     return all.filter((m) => m.name.toLowerCase().includes(s) || (m.mobile ?? '').includes(s) || (m.essl_id ?? '').toLowerCase().startsWith(s));
   }, [data, debounced]);
 
+  const setPhoto = (id: number) => (photo_key: string) =>
+    setData((d) => d && { ...d, members: d.members.map((x) => (x.id === id ? { ...x, photo_key } : x)) });
   const setParam = (k: string, v: string) => { const p = new URLSearchParams(params); if (v) p.set(k, v); else p.delete(k); p.delete('new'); setParams(p, { replace: true }); };
 
   return (
@@ -64,7 +76,7 @@ export default function Members() {
           <input className="input pl-11" placeholder="Search name, mobile or device ID" value={q} onChange={(e) => setQ(e.target.value)} type="search" />
         </div>
         <select className="input sm:w-48" value={sort} onChange={(e) => setParam('sort', e.target.value)} aria-label="Sort">
-          <option value="name">Sort: Name</option><option value="end">Sort: End date</option><option value="id">Sort: Device ID</option><option value="recent">Sort: Last visit</option>
+          <option value="name">Sort: Name</option><option value="end">Sort: End date</option><option value="id">Sort: Device ID</option><option value="recent">Sort: Last visit</option><option value="app">Sort: Last app login</option>
         </select>
       </div>
       <div className="mb-5"><Segmented value={status} options={FILTERS} onChange={(v) => setParam('status', v)} /></div>
@@ -83,8 +95,9 @@ export default function Members() {
                     <tr key={m.id} className="cursor-pointer" onClick={() => nav(`/members/${m.id}`)}>
                       <td>
                         <div className="flex items-center gap-3 min-w-[180px]">
-                          <Avatar name={m.name} photo={m.photo_key} size={36} />
-                          <div className="min-w-0"><p className="font-semibold truncate">{m.name}</p><p className="text-xs muted">{m.mobile ?? '—'}</p></div>
+                          <EditableAvatar memberId={m.id} name={m.name} photo={m.photo_key} size={36} onChange={setPhoto(m.id)} />
+                          <div className="min-w-0"><div className="flex items-center gap-1.5"><p className="font-semibold truncate">{m.name}</p><AppBadge m={m} /></div>
+                            <p className="text-xs muted">{m.mobile ?? '—'}{status === 'app_users' && ` · app ${m.app_last_login ? ago(m.app_last_login) : 'never logged in'}`}</p></div>
                         </div>
                       </td>
                       <td className="font-mono text-xs">{m.essl_id ?? <span className="text-warn">none</span>}</td>
@@ -107,10 +120,10 @@ export default function Members() {
             {list.slice(0, limit).map((m) => (
               <li key={m.id}>
                 <Link to={`/members/${m.id}`} className="card p-3.5 flex items-center gap-3">
-                  <Avatar name={m.name} photo={m.photo_key} size={44} />
+                  <EditableAvatar memberId={m.id} name={m.name} photo={m.photo_key} size={44} onChange={setPhoto(m.id)} />
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2"><p className="font-semibold truncate">{m.name}</p>{!m.device_in_sync && <ShieldAlert className="w-3.5 h-3.5 text-warn shrink-0" />}</div>
-                    <p className="text-xs muted truncate">#{m.essl_id ?? '—'} · {m.category ?? 'No plan'}{m.duration_label ? ` · ${m.duration_label}` : ''}</p>
+                    <div className="flex items-center gap-2"><p className="font-semibold truncate">{m.name}</p><AppBadge m={m} />{!m.device_in_sync && <ShieldAlert className="w-3.5 h-3.5 text-warn shrink-0" />}</div>
+                    <p className="text-xs muted truncate">#{m.essl_id ?? '—'} · {m.category ?? 'No plan'}{m.duration_label ? ` · ${m.duration_label}` : ''}{status === 'app_users' ? ` · app ${m.app_last_login ? ago(m.app_last_login) : 'never'}` : ''}</p>
                     {m.pct_elapsed !== null && m.status !== 'staff' && (
                       <div className="mt-2 h-1.5 rounded-full bg-black/5 dark:bg-white/10 overflow-hidden">
                         <div className={`h-full rounded-full ${m.status === 'expired' ? 'bg-bad' : m.status === 'expiring' ? 'bg-warn' : 'bg-lime'}`} style={{ width: `${m.pct_elapsed}%` }} />
@@ -133,7 +146,7 @@ export default function Members() {
         </>
       )}
 
-      <AddMemberModal open={adding} onClose={() => { setAdding(false); setParam('new', ''); }} onDone={(id) => { setAdding(false); nav(`/members/${id}`); }} />
+      <AddMemberModal open={adding} onClose={() => { setAdding(false); setParam('new', ''); }} onDone={(id) => { setAdding(false); nav(`/members/${id}?consent=1`); }} />
     </>
   );
 }

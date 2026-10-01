@@ -11,8 +11,12 @@ export interface FitProfile {
   bmr: number | null; tdee: number | null; goal_progress: number | null; targets: Targets;
 }
 
-export interface Food { id: number; name: string; kcal: number; protein: number; carbs: number; fat: number; serving_g: number; serving_label: string; veg: 'veg' | 'egg' | 'nonveg' | null; source: string; owner_member_id: number | null }
-export interface FoodLog { id: number; meal: Meal; food_id: number | null; name: string; grams: number; kcal: number; protein: number; carbs: number; fat: number }
+export interface Food { id: number; name: string; kcal: number; protein: number; carbs: number; fat: number; serving_g: number; serving_label: string; veg: 'veg' | 'egg' | 'nonveg' | null; source: string; owner_member_id: number | null; image?: string | null; has_recipe?: number }
+/** GET /fit/foods/:id — one food with its photo credit and recipe. */
+export interface FoodDetail extends Food { fiber: number | null; sugar: number | null; sodium_mg: number | null; image_credit: string | null; ingredients: string[]; steps: string[]; recipe_serves: number | null; recipe_min: number | null }
+/** Static food photo in /public/food; thumb = small list version. */
+export const foodImg = (image: string | null | undefined, thumb = false) => (image ? `/${thumb ? image.replace(/\.webp$/, '-t.webp') : image}` : null);
+export interface FoodLog { id: number; meal: Meal; food_id: number | null; name: string; grams: number; kcal: number; protein: number; carbs: number; fat: number; image?: string | null; has_recipe?: number | null }
 export interface SetEntry { reps: number; kg: number }
 export interface WorkoutLog { id: number; exercise_id: string | null; name: string; sets: SetEntry[]; duration_min: number; kcal: number; volume_kg: number; best_e1rm: number | null; images: string[]; body_part: string | null; tracking: string | null }
 

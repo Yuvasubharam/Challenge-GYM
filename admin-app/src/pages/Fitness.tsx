@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { ChevronLeft, ChevronRight, Dumbbell, Eye, EyeOff, ImagePlus, Plus, Search, Star, Trash2, Upload, Users, Utensils, Video, X } from 'lucide-react';
+import { ChefHat, ChevronLeft, ChevronRight, Dumbbell, Eye, EyeOff, ImagePlus, Plus, Search, Star, Trash2, Upload, Users, Utensils, Video, X } from 'lucide-react';
 import { api, qs } from '../lib/api';
 import { ago } from '../lib/format';
 import { useSession } from '../lib/session';
@@ -143,12 +143,12 @@ function TopList({ title, icon, rows, empty }: { title: string; icon: React.Reac
 }
 
 // ── Foods ───────────────────────────────────────────────────────────────
-interface FoodRow { id: number; name: string; kcal: number; protein: number; carbs: number; fat: number; fiber: number | null; serving_g: number; serving_label: string; veg: string | null; source: string; active: number; uses: number }
+interface FoodRow { id: number; name: string; kcal: number; protein: number; carbs: number; fat: number; fiber: number | null; serving_g: number; serving_label: string; veg: string | null; source: string; active: number; uses: number; image: string | null; has_recipe: number }
 interface FoodPage {
-  stats: { total: number; hidden: number; gym_added: number; veg: number; egg: number; nonveg: number; unknown: number };
+  stats: { total: number; hidden: number; gym_added: number; curated: number; veg: number; egg: number; nonveg: number; unknown: number };
   total: number; page: number; size: number; pages: number; foods: FoodRow[];
 }
-const SRC: Record<string, string> = { basic: 'USDA', indb: 'Indian DB', custom: 'Gym' };
+const SRC: Record<string, string> = { basic: 'USDA', indb: 'Indian DB', cg: 'Curated', custom: 'Gym' };
 
 function Foods() {
   const { can } = useSession();
@@ -180,7 +180,7 @@ function Foods() {
         </div>
         <div className="flex flex-wrap gap-x-6 gap-y-2 items-center">
           <Chips value={veg} onChange={setVeg} options={[['', `All types${s ? ` · ${s.total}` : ''}`], ['veg', `🟢 Veg${s ? ` · ${s.veg}` : ''}`], ['egg', `🟡 Egg${s ? ` · ${s.egg}` : ''}`], ['nonveg', `🔴 Non-veg${s ? ` · ${s.nonveg}` : ''}`], ['unknown', 'Unknown']]} />
-          <Chips value={source} onChange={setSource} options={[['', 'All sources'], ['indb', 'Indian DB'], ['basic', 'USDA'], ['custom', `Gym-added${s ? ` · ${s.gym_added}` : ''}`]]} />
+          <Chips value={source} onChange={setSource} options={[['', 'All sources'], ['cg', `Curated + recipe${s ? ` · ${s.curated}` : ''}`], ['indb', 'Indian DB'], ['basic', 'USDA'], ['custom', `Gym-added${s ? ` · ${s.gym_added}` : ''}`]]} />
           <Chips value={status} onChange={setStatus} options={[['visible', 'Visible'], ['hidden', `Hidden${s ? ` · ${s.hidden}` : ''}`], ['all', 'All']]} />
         </div>
       </div>
@@ -193,7 +193,8 @@ function Foods() {
               <thead><tr><th>Food</th><th className="text-right">kcal</th><th className="text-right">Protein</th><th className="text-right">Carbs</th><th className="text-right">Fat</th><th>Serving</th><th>Source</th><th className="text-right">Logged</th></tr></thead>
               <tbody>{data.foods.map((r) => (
                 <tr key={r.id} className={`${admin ? 'cursor-pointer' : ''} ${r.active ? '' : 'opacity-40'}`} onClick={() => admin && setEdit(r)}>
-                  <td className="min-w-[200px]"><span className={`inline-block w-2 h-2 rounded-sm mr-2 ${r.veg === 'nonveg' ? 'bg-bad' : r.veg === 'egg' ? 'bg-warn' : r.veg === 'veg' ? 'bg-ok' : 'bg-ink-300'}`} />{r.name}</td>
+                  <td className="min-w-[200px]"><span className={`inline-block w-2 h-2 rounded-sm mr-2 ${r.veg === 'nonveg' ? 'bg-bad' : r.veg === 'egg' ? 'bg-warn' : r.veg === 'veg' ? 'bg-ok' : 'bg-ink-300'}`} />{r.name}
+                    {!!r.has_recipe && <ChefHat className="inline w-3.5 h-3.5 ml-1.5 muted" aria-label="Has recipe" />}</td>
                   <td className="text-right font-semibold">{r.kcal}</td><td className="text-right">{r.protein}</td><td className="text-right">{r.carbs}</td><td className="text-right">{r.fat}</td>
                   <td className="text-xs muted whitespace-nowrap">{r.serving_label}</td><td className="text-xs muted">{SRC[r.source] ?? r.source}</td><td className="text-right text-xs muted">{r.uses}×</td>
                 </tr>
@@ -212,12 +213,24 @@ function Foods() {
 function FoodEditor({ row, onClose, onSaved }: { row: FoodRow | 'new'; onClose: () => void; onSaved: () => void }) {
   const { busy, run } = useAction();
   const [f, setF] = useState(row === 'new'
-    ? { name: '', kcal: '', protein: '', carbs: '', fat: '', fiber: '', serving_g: '100', serving_label: '100 g', veg: 'veg', active: true }
+    ? { name: '', kcal: '', protein: '', carbs: '', fat: '', fiber: '', serving_g: '100', serving_label: '100 g', veg: 'veg', active: true, ingredients: '', steps: '' }
     : { name: row.name, kcal: String(row.kcal), protein: String(row.protein), carbs: String(row.carbs), fat: String(row.fat), fiber: row.fiber === null ? '' : String(row.fiber),
-        serving_g: String(row.serving_g), serving_label: row.serving_label, veg: row.veg ?? '', active: !!row.active });
-  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setF({ ...f, [k]: e.target.value });
+        serving_g: String(row.serving_g), serving_label: row.serving_label, veg: row.veg ?? '', active: !!row.active, ingredients: '', steps: '' });
+  // The list has no recipe text: load it for an existing food, then fill the two text boxes (one item per line).
+  const [detail, setDetail] = useState<{ image: string | null; image_credit: string | null } | null>(null);
+  const [recipeReady, setRecipeReady] = useState(row === 'new');
+  useEffect(() => {
+    if (row === 'new') return;
+    api.get<{ ingredients: string[]; steps: string[]; image: string | null; image_credit: string | null }>(`/foods/${row.id}`).then((d) => {
+      setF((cur) => ({ ...cur, ingredients: d.ingredients.join('\n'), steps: d.steps.join('\n') }));
+      setDetail(d);
+      setRecipeReady(true);
+    }).catch(() => setRecipeReady(true));
+  }, [row]);
+  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => setF({ ...f, [k]: e.target.value });
   const body = { name: f.name, kcal: Number(f.kcal), protein: Number(f.protein || 0), carbs: Number(f.carbs || 0), fat: Number(f.fat || 0),
-    ...(f.fiber !== '' ? { fiber: Number(f.fiber) } : {}), serving_g: Number(f.serving_g || 100), serving_label: f.serving_label, veg: f.veg || null, active: f.active };
+    ...(f.fiber !== '' ? { fiber: Number(f.fiber) } : {}), serving_g: Number(f.serving_g || 100), serving_label: f.serving_label, veg: f.veg || null, active: f.active,
+    ...(recipeReady ? { ingredients: f.ingredients, steps: f.steps } : {}) };
   const perServing = Math.round((Number(f.kcal || 0) * Number(f.serving_g || 100)) / 100);
   return (
     <Modal open onClose={onClose} title={row === 'new' ? 'Add food' : 'Edit food'}
@@ -238,6 +251,12 @@ function FoodEditor({ row, onClose, onSaved }: { row: FoodRow | 'new'; onClose: 
           <Field label="Type"><select className="input" value={f.veg} onChange={set('veg')}><option value="veg">Veg</option><option value="egg">Contains egg</option><option value="nonveg">Non-veg</option><option value="">Unknown</option></select></Field>
           <label className="flex items-center gap-2 text-sm mt-7"><input type="checkbox" className="accent-lime w-4 h-4" checked={f.active} onChange={(e) => setF({ ...f, active: e.target.checked })} />Visible to members</label>
         </div>
+        <p className="text-xs font-semibold flex items-center gap-1.5 pt-2"><ChefHat className="w-4 h-4" />Recipe <span className="font-normal muted">— optional, shown to members under ⓘ</span></p>
+        {!recipeReady ? <div className="py-4 flex justify-center"><Spinner /></div> : <>
+          <Field label="Ingredients" hint="One per line"><textarea className="input min-h-[96px] py-2" value={f.ingredients} onChange={set('ingredients')} placeholder={'2 cups cooked rice\n3 eggs\n1 tbsp soy sauce'} /></Field>
+          <Field label="Steps" hint="One step per line"><textarea className="input min-h-[120px] py-2" value={f.steps} onChange={set('steps')} placeholder={'Scramble the eggs and keep aside.\nStir-fry the vegetables…'} /></Field>
+        </>}
+        {detail?.image_credit && <p className="text-[11px] muted">Photo: {detail.image_credit}</p>}
       </div>
     </Modal>
   );

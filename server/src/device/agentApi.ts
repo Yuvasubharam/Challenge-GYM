@@ -3,7 +3,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../env';
 import { sha256 } from '../lib/crypto';
-import { all, first, getSettings, nowIso, run } from '../lib/db';
+import { all, first, getAccessSettings, nowIso, run } from '../lib/db';
 import { claimForAgent, finish, ingestOperlog, ingestPunches, type CommandRow } from './queue';
 
 export const agentApi = new Hono<AppEnv & { Variables: { agentName: string } }>();
@@ -27,8 +27,9 @@ agentApi.post('/heartbeat', async (c) => {
   const name = c.get('agentName');
   // The env-token agent gets a synthetic row so the admin app can show its last heartbeat.
   await run(c.env.DB, `INSERT INTO agents (name, token_hash, last_seen_at, info) VALUES (?, ?, ?, ?)
-                       ON CONFLICT(token_hash) DO UPDATE SET last_seen_at=excluded.last_seen_at, info=excluded.info`,
-    name, name === 'default' ? 'env:default' : `name:${name}`, nowIso(), JSON.stringify(b).slice(0, 4000));
+                       ON CONFLICT(token_hash) DO UPDATE SET last_seen_at=excluded.last_seen_at, info=excluded.info
+                       WHERE agents.last_seen_at IS NULL OR agents.last_seen_at < ? OR agents.info IS NOT excluded.info`,
+    name, name === 'default' ? 'env:default' : `name:${name}`, nowIso(), JSON.stringify(b).slice(0, 4000), new Date(Date.now() - 60_000).toISOString());
   const d = b.device;
   if (d?.sn && /^[A-Za-z0-9]{4,32}$/.test(d.sn)) {
     const allow = (c.env.DEVICE_SN_ALLOWLIST ?? '').split(',').map((s) => s.trim());
@@ -39,14 +40,16 @@ agentApi.post('/heartbeat', async (c) => {
          user_count=excluded.user_count, fp_count=excluded.fp_count, att_count=excluded.att_count,
          approved=MAX(devices.approved, excluded.approved),
          last_seen_at=CASE WHEN devices.last_seen_via='adms' AND devices.last_seen_at > ? THEN devices.last_seen_at ELSE excluded.last_seen_at END,
-         last_seen_via=CASE WHEN devices.last_seen_via='adms' AND devices.last_seen_at > ? THEN 'adms' ELSE 'agent' END`,
+         last_seen_via=CASE WHEN devices.last_seen_via='adms' AND devices.last_seen_at > ? THEN 'adms' ELSE 'agent' END
+       WHERE devices.last_seen_at IS NULL OR devices.last_seen_at < ? OR devices.user_count IS NOT excluded.user_count
+         OR devices.fp_count IS NOT excluded.fp_count OR devices.att_count IS NOT excluded.att_count OR devices.last_ip IS NOT excluded.last_ip`,
       d.sn, allow.includes(d.sn) ? 1 : 0, d.platform ?? null, d.firmware ?? null, d.ip ?? null, nowIso(),
       d.users ?? null, d.fingers ?? null, d.records ?? null,
-      new Date(Date.now() - 120_000).toISOString(), new Date(Date.now() - 120_000).toISOString());
+      new Date(Date.now() - 120_000).toISOString(), new Date(Date.now() - 120_000).toISOString(), new Date(Date.now() - 60_000).toISOString());
   }
-  const s = await getSettings(c.env.DB);
+  const access = await getAccessSettings(c.env.DB);
   const last = await first<{ t: string | null }>(c.env.DB, `SELECT MAX(punched_at) AS t FROM attendance WHERE source IN ('agent','adms')`);
-  return c.json({ ok: true, block_method: s.access.block_method, last_punch: last?.t ?? null, server_time: nowIso() });
+  return c.json({ ok: true, block_method: access.block_method, last_punch: last?.t ?? null, server_time: nowIso() });
 });
 
 agentApi.post('/commands/claim', async (c) => {
@@ -98,7 +101,7 @@ agentApi.post('/device-users', async (c) => {
     await run(c.env.DB, `UPDATE device_users SET on_device=0 WHERE seen_at < ? AND on_device=1`, started);
     const stmts = raw
       .filter((u) => u.fingers !== undefined)
-      .map((u) => c.env.DB.prepare(`UPDATE device_users SET fp_count=? WHERE essl_id=?`).bind(Number(u.fingers), String(u.pin)));
+      .map((u) => c.env.DB.prepare(`UPDATE device_users SET fp_count=? WHERE essl_id=? AND fp_count IS NOT ?`).bind(Number(u.fingers), String(u.pin), Number(u.fingers)));
     for (let i = 0; i < stmts.length; i += 50) await c.env.DB.batch(stmts.slice(i, i + 50));
     // Reflect reality in member device_state (on device → active unless we know it was blocked by group)
     await run(c.env.DB, `UPDATE members SET device_state='removed', device_synced_at=? WHERE archived=0 AND essl_id IS NOT NULL

@@ -23,7 +23,37 @@ export interface GymSettings {
   access: AccessSettings;
   reminders: ReminderSettings;
   receipt: { prefix: string; next: number };
+  renewal_push: RenewalPushSettings;
+  /** Written by the daily reminder job, not by the settings form. */
+  renewal_push_log: { day: string | null; at: string | null; members: number; sent: number; failed: number };
 }
+
+/** Daily phone reminder to app members whose membership ends within `days_before` days. */
+export interface RenewalPushSettings {
+  enabled: boolean;
+  days_before: number;
+  send_hour: number; // gym local time, 0–23
+  /** Templates: {name} {days} {when} {end_date} {gym} */
+  title: string;
+  message: string;
+  /** One line is appended per day, rotating, so the nudge changes daily. */
+  motivation: string[];
+}
+
+export const DEFAULT_RENEWAL_PUSH: RenewalPushSettings = {
+  enabled: false,
+  days_before: 7,
+  send_hour: 9,
+  title: 'Hi {name}, your membership ends {when} ⏰',
+  message: 'Renew before {end_date} to keep your streak going — tap to renew in the app or pay at the front desk.',
+  motivation: [
+    '💪 Every rep counts — see you at the gym today!',
+    '🔥 Consistency beats motivation. Show up today.',
+    '🏋️ Your future self will thank you for today’s workout.',
+    '⚡ Don’t stop now — you’re closer than you think.',
+    '🥇 Discipline today, results tomorrow.',
+  ],
+};
 
 const DEFAULTS: GymSettings = {
   gym: { name: 'Challenge Gym', tagline: '', phone: '', address: '' },
@@ -31,6 +61,8 @@ const DEFAULTS: GymSettings = {
   access: DEFAULT_ACCESS,
   reminders: DEFAULT_REMINDERS,
   receipt: { prefix: 'CG', next: 1 },
+  renewal_push: DEFAULT_RENEWAL_PUSH,
+  renewal_push_log: { day: null, at: null, members: 0, sent: 0, failed: 0 },
 };
 
 export async function getSettings(db: D1Database): Promise<GymSettings> {
@@ -45,6 +77,21 @@ export async function getSettings(db: D1Database): Promise<GymSettings> {
     }
   }
   return out as unknown as GymSettings;
+}
+
+export async function getAccessSettings(db: D1Database): Promise<AccessSettings> {
+  const row = await first<{ value: string }>(db, `SELECT value FROM settings WHERE key='access'`);
+  if (!row) return { ...DEFAULT_ACCESS, staff_prefixes: [...DEFAULT_ACCESS.staff_prefixes] };
+  try {
+    const parsed = JSON.parse(row.value) as Partial<AccessSettings>;
+    return {
+      ...DEFAULT_ACCESS,
+      ...parsed,
+      staff_prefixes: Array.isArray(parsed.staff_prefixes) ? parsed.staff_prefixes : [...DEFAULT_ACCESS.staff_prefixes],
+    };
+  } catch {
+    return { ...DEFAULT_ACCESS, staff_prefixes: [...DEFAULT_ACCESS.staff_prefixes] };
+  }
 }
 
 export async function putSetting(db: D1Database, key: keyof GymSettings, value: unknown) {

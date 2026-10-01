@@ -17,7 +17,7 @@ const Section = ({ title, to, children }: { title: string; to?: string; children
   <section>
     <div className="flex items-center justify-between mb-3 mt-2">
       <h2 className="font-display font-semibold text-lg">{title}</h2>
-      {to && <Link to={to} className="text-sm font-semibold text-lime-700 dark:text-lime flex items-center gap-0.5">See all<ChevronRight className="w-4 h-4" /></Link>}
+      {to && <Link to={to} className="text-sm font-semibold text-lime-700 dark:text-lime flex items-center gap-0.5 py-2.5 -my-2.5 pl-3">See all<ChevronRight className="w-4 h-4" /></Link>}
     </div>
     {children}
   </section>
@@ -80,7 +80,7 @@ export const KindBadge = ({ kind }: { kind: Post['kind'] }) => <span className={
 function DateTile({ d }: { d: string }) {
   const dt = new Date(d + 'T00:00:00');
   return (
-    <div className="w-12 shrink-0 rounded-2xl bg-lime text-ink-900 text-center py-1.5">
+    <div className="w-12 shrink-0 self-start rounded-2xl bg-lime text-ink-900 text-center py-1.5">
       <p className="text-[10px] font-bold uppercase">{dt.toLocaleString('en-IN', { month: 'short' })}</p>
       <p className="font-display text-xl font-bold leading-none">{dt.getDate()}</p>
     </div>

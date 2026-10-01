@@ -5,7 +5,7 @@ import { date, money } from '../lib/format';
 import { useHome } from '../lib/home';
 import { useFit } from '../lib/fitctx';
 import { GOAL_LABEL, type Day } from '../lib/fit';
-import { Avatar, ErrorBox, PageLoader, Ring, StatusBadge, useAction, useLoad } from '../components/ui';
+import { Avatar, ErrorBox, PageLoader, Ring, StatusBadge, useAction, useLoad, useToast } from '../components/ui';
 import type { HomeContent } from '../lib/content';
 import { BellButton, Carousel, GalleryStrip, NewsStrip, ShopStrip } from '../components/HomeContent';
 
@@ -15,6 +15,7 @@ export default function Home() {
   const { data: day, reload: reloadDay } = useLoad(() => api.get<Day>('/fit/day'));
   const { data: cms } = useLoad(() => api.get<HomeContent>('/content/home'));
   const { run } = useAction();
+  const toast = useToast();
   if (error) return <ErrorBox error={error} onRetry={reload} />;
   if (!h) return <PageLoader />;
 
@@ -26,7 +27,9 @@ export default function Home() {
   const prof = fit?.profile;
   const t = day?.targets;
   const kcalPct = t?.kcal && day ? (day.eaten.kcal / (t.kcal + day.burned)) * 100 : 0;
-  const addGlass = () => day && run(() => api.put('/fit/water', { ml: day.water_ml + 250 }), '+1 glass of water 💧').then(reloadDay);
+  const addGlass = () => day && (day.water_ml >= 5000
+    ? toast('ok', '5 L today — that is the daily maximum 💧')
+    : run(() => api.put('/fit/water', { ml: Math.min(5000, day.water_ml + 250) }), '+1 glass of water 💧').then(reloadDay));
 
   return (
     <div className="space-y-4">
@@ -92,7 +95,9 @@ export default function Home() {
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2"><p className="font-semibold truncate">{p.category ?? 'Membership'}</p><StatusBadge status={p.status} /></div>
-            <p className="text-sm muted truncate">{p.status === 'staff' ? 'Staff access' : p.end_date ? `${left < 0 ? 'Ended' : 'Valid till'} ${date(p.end_date)}${left >= 0 ? ` · ${left} days left` : ''}` : 'No active plan'}</p>
+            <p className="text-sm muted">{p.status === 'staff' ? 'Staff access' : p.end_date
+              ? <>{left < 0 ? 'Ended' : 'Valid till'} <span className="whitespace-nowrap">{date(p.end_date)}</span>{left >= 0 && <span className="whitespace-nowrap"> · {left} days left</span>}</>
+              : 'No active plan'}</p>
           </div>
           <ArrowRight className="w-5 h-5 muted" />
         </div>

@@ -98,6 +98,13 @@ device.post('/demote', requireAdmin('owner'), async (c) => {
   return c.json({ id });
 });
 
+/** Outcome of one command — the admin app polls this after an access change (1 row read). */
+device.get('/commands/:id', async (c) => {
+  const cmd = await first(c.env.DB, `SELECT id, essl_id, action, status, channel, result, done_at FROM device_commands WHERE id=?`, Number(c.req.param('id')));
+  assert(cmd, 404, 'Command not found');
+  return c.json(cmd);
+});
+
 device.post('/commands/:id/cancel', requireAdmin('owner', 'admin'), async (c) => {
   await run(c.env.DB, `UPDATE device_commands SET status='cancelled', result='cancelled by '||?, done_at=? WHERE id=? AND status IN ('pending','sent')`,
     c.get('session').name, nowIso(), Number(c.req.param('id')));

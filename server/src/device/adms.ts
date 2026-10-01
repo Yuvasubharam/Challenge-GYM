@@ -12,12 +12,17 @@ const text = (body: string) => new Response(body, { headers: { 'Content-Type': '
 
 async function touchDevice(env: Env, sn: string, ip: string | null, extra: Record<string, string | null> = {}): Promise<boolean> {
   const allow = (env.DEVICE_SN_ALLOWLIST ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  // The device polls every few seconds: only write when something changed or every 30 s
+  // (D1 bills per row written; "online" needs minute precision, not second).
   await run(
     env.DB,
     `INSERT INTO devices (sn, approved, last_ip, last_seen_at, last_seen_via, push_version) VALUES (?, ?, ?, ?, 'adms', ?)
      ON CONFLICT(sn) DO UPDATE SET last_ip=excluded.last_ip, last_seen_at=excluded.last_seen_at, last_seen_via='adms',
-       approved=MAX(devices.approved, excluded.approved), push_version=COALESCE(excluded.push_version, devices.push_version)`,
-    sn, allow.includes(sn) ? 1 : 0, ip, nowIso(), extra.pushver ?? null,
+       approved=MAX(devices.approved, excluded.approved), push_version=COALESCE(excluded.push_version, devices.push_version)
+     WHERE devices.last_seen_at IS NULL OR devices.last_seen_at < ? OR devices.last_seen_via <> 'adms'
+       OR devices.last_ip IS NOT excluded.last_ip OR devices.approved < excluded.approved
+       OR (excluded.push_version IS NOT NULL AND devices.push_version IS NOT excluded.push_version)`,
+    sn, allow.includes(sn) ? 1 : 0, ip, nowIso(), extra.pushver ?? null, new Date(Date.now() - 30_000).toISOString(),
   );
   const d = await first<{ approved: number }>(env.DB, `SELECT approved FROM devices WHERE sn=?`, sn);
   return !!d?.approved;
@@ -79,8 +84,9 @@ adms.get('/getrequest', async (c) => {
   if (info) {
     // INFO=FirmwareVer,UserCount,FPCount,AttCount,DeviceIP,...
     const [fw, users, fps, atts] = info.split(',');
-    await run(c.env.DB, `UPDATE devices SET firmware=?, user_count=?, fp_count=?, att_count=?, info=? WHERE sn=?`,
-      fw ?? null, Number(users) || null, Number(fps) || null, Number(atts) || null, JSON.stringify({ info }), sn);
+    const infoJson = JSON.stringify({ info });
+    await run(c.env.DB, `UPDATE devices SET firmware=?, user_count=?, fp_count=?, att_count=?, info=? WHERE sn=? AND info IS NOT ?`,
+      fw ?? null, Number(users) || null, Number(fps) || null, Number(atts) || null, infoJson, sn, infoJson);
   }
   if (!approved) return text('OK');
   return text(await claimForAdms(c.env, sn));

@@ -2,7 +2,7 @@
 // confirming a member's UPI renewal request.
 import type { Env } from '../env';
 import { tzOffset } from '../env';
-import { assert, first, int, nextReceiptNo, run, str } from './db';
+import { assert, first, int, nextReceiptNo, nowIso, run, str } from './db';
 import { addDays, isDate, today as todayOf } from './dates';
 import { durationLabel, renewalStart, termEnd } from './membership';
 import { checkCoupon, type CouponRow } from './coupons';
@@ -72,7 +72,13 @@ export async function createTerm(env: Env, memberId: number, t: TermInput, kind:
   let payment: { id: number; receipt_no: string } | null = null;
   const paid = t.pay_full ? q.total : int(t.paid) ?? 0;
   if (paid > 0) payment = await recordPayment(env, memberId, ms!.id, { amount: paid, mode: t.mode, reference: t.reference, entry_type: kind === 'new' ? 'new' : 'renewal' }, by);
-  return { membership_id: ms!.id, start_date: start, end_date: end, price: q.total, list_price: q.list, discount: q.discount, bonus_days: q.bonus_days, coupon: coupon?.code ?? null, payment };
+  // A paid term puts door access back on the membership dates: a manual "blocked" would keep a renewed
+  // member out, and a manual "allowed" (often set to let someone in while a renewal was pending) would
+  // stop them ever being blocked at the new expiry. Callers then run syncMember.
+  const override = (await first<{ access_override: string | null }>(env.DB, `SELECT access_override FROM members WHERE id=?`, memberId))?.access_override ?? null;
+  if (override) await run(env.DB, `UPDATE members SET access_override=NULL, updated_at=? WHERE id=?`, nowIso(), memberId);
+  return { membership_id: ms!.id, start_date: start, end_date: end, price: q.total, list_price: q.list, discount: q.discount, bonus_days: q.bonus_days, coupon: coupon?.code ?? null, payment,
+    override_cleared: override };
 }
 
 const MODES = ['cash', 'upi', 'card', 'bank', 'other'];

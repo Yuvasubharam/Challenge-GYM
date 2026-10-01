@@ -1,0 +1,10 @@
+name = "challenge-gym-launch-redirect"
+main = "index.js"
+compatibility_date = "2024-12-01"
+account_id = "c833d4e17d8a22d81d27bfee17492127"
+workers_dev = false
+
+routes = [
+  { pattern = "challengegym.in/*", zone_name = "challengegym.in" },
+  { pattern = "www.challengegym.in/*", zone_name = "challengegym.in" },
+]

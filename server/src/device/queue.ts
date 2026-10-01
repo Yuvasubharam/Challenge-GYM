@@ -7,7 +7,7 @@
 //   • Agent — the PC bridge on the gym LAN claims commands and uses TCP 4370 (pyzk)
 import type { Env } from '../env';
 import { tzOffset } from '../env';
-import { all, first, getSettings, nowIso, run } from '../lib/db';
+import { all, first, getAccessSettings, getSettings, nowIso, run } from '../lib/db';
 import { accessAllowed } from '../lib/membership';
 import { deviceTimeToIso, today as todayOf } from '../lib/dates';
 import {
@@ -38,10 +38,14 @@ export async function queueCommand(
   const pin = c.essl_id ?? null;
   if (pin && !isSafePin(pin)) throw new Error(`Invalid device PIN: ${pin}`);
   if (pin) {
-    // A newer intent supersedes an undelivered opposite one (block→unblock flip-flop).
+    // A newer intent supersedes an undelivered opposite one (block→unblock flip-flop). A block that is
+    // only 'sent' for its fingerprint-backup pre-step has not touched the user yet, and would otherwise
+    // go back to pending and run AFTER this command.
     const opp = OPPOSITE[c.action];
     if (opp) {
-      await run(env.DB, `UPDATE device_commands SET status='cancelled', result='superseded', done_at=? WHERE essl_id=? AND action=? AND status='pending'`, nowIso(), pin, opp);
+      await run(env.DB, `UPDATE device_commands SET status='cancelled', result='superseded', done_at=?
+                         WHERE essl_id=? AND action=? AND (status='pending' OR (status='sent' AND json_extract(payload,'$.awaiting_backup')=1))`,
+        nowIso(), pin, opp);
     }
     // De-duplicate identical pending work.
     const dup = await first<{ id: number }>(env.DB, `SELECT id FROM device_commands WHERE essl_id=? AND action=? AND status IN ('pending','sent') LIMIT 1`, pin, c.action);
@@ -70,9 +74,9 @@ async function templatesFor(env: Env, pin: string) {
  * in the cloud; otherwise a backup query goes first so renewal can restore them.
  */
 export async function claimForAdms(env: Env, sn: string, max = 6): Promise<string> {
-  const settings = await getSettings(env.DB);
   const pending = await all<CommandRow>(env.DB, `SELECT * FROM device_commands WHERE status='pending' ORDER BY id LIMIT 30`);
   const out: string[] = [];
+  let defaultBlockMethod: string | undefined;
   let taken = 0;
 
   for (const cmd of pending) {
@@ -93,7 +97,7 @@ export async function claimForAdms(env: Env, sn: string, max = 6): Promise<strin
         break;
       }
       case 'block': {
-        const method = payload.method ?? settings.access.block_method;
+        const method = payload.method ?? (defaultBlockMethod ??= (await getAccessSettings(env.DB)).block_method);
         if (method === 'disable') {
           const m = await memberForPin(env, pin);
           lines = [userInfoLine({ pin, name: m?.name ?? pin, grp: payload.blocked_group ?? 99 })];
@@ -207,9 +211,9 @@ export async function applyAdmsReplies(env: Env, replies: { id: number; ret: num
 
 // ── Agent delivery ──────────────────────────────────────────────────────
 export async function claimForAgent(env: Env, max = 10) {
-  const settings = await getSettings(env.DB);
   const pending = await all<CommandRow>(env.DB, `SELECT * FROM device_commands WHERE status='pending' ORDER BY id LIMIT ?`, max);
   const out = [];
+  let defaultBlockMethod: string | undefined;
   for (const cmd of pending) {
     if (!(await claim(env, cmd.id, null, 'agent'))) continue;
     const payload = cmd.payload ? JSON.parse(cmd.payload) : {};
@@ -219,7 +223,7 @@ export async function claimForAgent(env: Env, max = 10) {
       action: cmd.action,
       essl_id: cmd.essl_id,
       name: payload.name ?? m?.name ?? cmd.essl_id,
-      method: payload.method ?? settings.access.block_method,
+      method: payload.method ?? (defaultBlockMethod ??= (await getAccessSettings(env.DB)).block_method),
       payload,
       templates: cmd.action === 'unblock' && cmd.essl_id ? await templatesFor(env, cmd.essl_id) : [],
     });
@@ -256,16 +260,21 @@ export async function finish(env: Env, cmd: CommandRow, ok: boolean, result: str
 /** Commands delivered but never answered (device offline/rebooted) go back to the queue. */
 export async function requeueStale(env: Env, minutes = 15) {
   const cutoff = new Date(Date.now() - minutes * 60_000).toISOString();
-  await run(env.DB, `DELETE FROM adms_lines WHERE return_code IS NULL AND command_id IN (SELECT id FROM device_commands WHERE status='sent' AND sent_at < ?)`, cutoff);
+  // Runs every 5 minutes: start from the (usually empty) indexed list of sent commands
+  // instead of scanning adms_lines, which grows with every command ever sent.
+  const stale = (await all<{ id: number }>(env.DB, `SELECT id FROM device_commands WHERE status='sent' AND sent_at < ?`, cutoff)).map((r) => r.id);
+  if (!stale.length) return;
+  const ids = JSON.stringify(stale);
+  await run(env.DB, `DELETE FROM adms_lines WHERE command_id IN (SELECT value FROM json_each(?)) AND return_code IS NULL`, ids);
   await run(env.DB, `UPDATE device_commands SET status=CASE WHEN attempts >= 5 THEN 'failed' ELSE 'pending' END,
                      result=CASE WHEN attempts >= 5 THEN 'no response from device after 5 attempts' ELSE result END
-                     WHERE status='sent' AND sent_at < ?`, cutoff);
+                     WHERE id IN (SELECT value FROM json_each(?)) AND status='sent'`, ids);
 }
 
 // ── Reconciler ──────────────────────────────────────────────────────────
 export interface PlannedChange { member_id: number; essl_id: string; name: string; action: 'block' | 'unblock'; end_date: string | null }
 
-export async function planReconcile(env: Env): Promise<PlannedChange[]> {
+export async function planReconcile(env: Env, memberId?: number): Promise<PlannedChange[]> {
   const s = await getSettings(env.DB);
   const today = todayOf(tzOffset(env));
   const rows = await all<{
@@ -276,7 +285,8 @@ export async function planReconcile(env: Env): Promise<PlannedChange[]> {
     `SELECT m.id, m.essl_id, m.name, m.device_state, m.is_staff, m.access_override, m.frozen_from, m.frozen_until,
             (SELECT MAX(end_date) FROM memberships WHERE member_id=m.id AND status='active') AS end_date,
             EXISTS(SELECT 1 FROM device_commands c WHERE c.essl_id=m.essl_id AND c.action IN ('block','unblock') AND c.status IN ('pending','sent')) AS busy
-     FROM members m WHERE m.archived=0 AND m.essl_id IS NOT NULL`,
+     FROM members m WHERE m.archived=0 AND m.essl_id IS NOT NULL ${memberId ? 'AND m.id=?' : ''}`,
+    ...(memberId ? [memberId] : []),
   );
   const plan: PlannedChange[] = [];
   for (const r of rows) {
@@ -305,16 +315,38 @@ export async function reconcile(env: Env, opts: { force?: boolean; by?: string; 
   return { queued: plan.length };
 }
 
-/** Queue an immediate sync for one member (after renewal/edit) if auto-enforce is on or forced. */
+/**
+ * Queue an immediate sync for one member (after renewal/edit/access change) if auto-enforce is on or forced.
+ * Unlike the bulk reconciler this does not skip members with a command in flight: it compares the
+ * wanted state with what the device will be once that command lands, so block → unblock clicked in
+ * quick succession still ends with the member allowed. Returns the command to wait on, or null when
+ * the device already matches.
+ */
 export async function syncMember(env: Env, memberId: number, by: string, force = false) {
   const s = await getSettings(env.DB);
   if (!s.access.auto_enforce && !force) return null;
-  const plan = (await planReconcile(env)).find((p) => p.member_id === memberId);
-  if (!plan) return null;
+  const r = await first<{
+    essl_id: string; name: string; device_state: string; is_staff: number; access_override: 'allow' | 'deny' | null;
+    frozen_from: string | null; frozen_until: string | null; end_date: string | null; inflight_id: number | null; inflight: 'block' | 'unblock' | null;
+  }>(
+    env.DB,
+    `SELECT m.essl_id, m.name, m.device_state, m.is_staff, m.access_override, m.frozen_from, m.frozen_until,
+            (SELECT MAX(end_date) FROM memberships WHERE member_id=m.id AND status='active') AS end_date,
+            c.id AS inflight_id, c.action AS inflight
+     FROM members m
+     LEFT JOIN device_commands c ON c.id = (SELECT id FROM device_commands WHERE essl_id=m.essl_id AND action IN ('block','unblock')
+                                            AND status IN ('pending','sent') ORDER BY id DESC LIMIT 1)
+     WHERE m.id=? AND m.archived=0 AND m.essl_id IS NOT NULL`,
+    memberId,
+  );
+  if (!r) return null;
+  const want = accessAllowed(r, todayOf(tzOffset(env)), s.access) ? 'unblock' : 'block';
+  const willBeOff = r.inflight ? r.inflight === 'block' : r.device_state === 'blocked' || r.device_state === 'removed';
+  if ((want === 'block') === willBeOff) return r.inflight === want ? r.inflight_id : null;
   return queueCommand(env, {
-    essl_id: plan.essl_id, action: plan.action, by,
-    payload: plan.action === 'block' ? { method: s.access.block_method } : { name: plan.name },
-    reason: plan.action === 'block' ? 'membership expired' : 'membership renewed',
+    essl_id: r.essl_id, action: want, by,
+    payload: want === 'block' ? { method: s.access.block_method } : { name: r.name },
+    reason: want === 'block' ? 'access removed' : 'access restored',
   });
 }
 

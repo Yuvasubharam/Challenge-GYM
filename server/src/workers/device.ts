@@ -15,7 +15,10 @@ app.all('*', (c) => c.text('Not found', 404));
 
 app.onError((err, c) => {
   console.error('device-worker error', c.req.method, c.req.path, err);
-  // Devices retry aggressively on non-200; answer OK on /iclock so the X990 does not stall.
+  // A failed upload (punches, users, templates) must not be acknowledged, or the X990 advances
+  // its stamp and never resends it; a non-200 makes it retry the same batch later.
+  if (c.req.method === 'POST' && c.req.path.startsWith('/iclock/cdata')) return c.text('ERROR', 503);
+  // Devices retry aggressively on non-200; answer OK on other /iclock calls so the X990 does not stall.
   if (c.req.path.startsWith('/iclock')) return c.text('OK');
   return c.json({ error: 'internal error' }, 500);
 });

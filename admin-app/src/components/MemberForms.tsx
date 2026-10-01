@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
 import { date, money, todayLocal } from '../lib/format';
 import type { Plan } from '../lib/types';
-import { Ticket, X } from 'lucide-react';
-import { Field, Modal, Spinner, useAction } from './ui';
+import { Camera, Ticket, X } from 'lucide-react';
+import { Field, Modal, Spinner, useAction, useToast } from './ui';
+import { PhotoCapture } from './PhotoCapture';
 
 const MODES = [
   { v: 'cash', l: 'Cash' }, { v: 'upi', l: 'UPI' }, { v: 'card', l: 'Card' }, { v: 'bank', l: 'Bank' },
@@ -194,9 +195,13 @@ export function AddMemberModal({ open, onClose, onDone }: { open: boolean; onClo
   const [f, setF] = useState({ name: '', mobile: '', essl_id: '', gender: '', dob: '', email: '', emergency_contact: '', notes: '' });
   const [term, setTerm] = useState(emptyTerm);
   const [withPlan, setWithPlan] = useState(true);
+  const [photo, setPhoto] = useState<{ blob: Blob; url: string } | null>(null);
+  const [camera, setCamera] = useState(false);
+  const toast = useToast();
 
   useEffect(() => {
     if (!open) return;
+    setPhoto((p) => { if (p) URL.revokeObjectURL(p.url); return null; });
     setF({ name: '', mobile: '', essl_id: '', gender: '', dob: '', email: '', emergency_contact: '', notes: '' });
     setTerm(emptyTerm);
     api.get<{ next: string }>('/members/next-id').then((r) => setF((x) => ({ ...x, essl_id: r.next }))).catch(() => undefined);
@@ -206,7 +211,10 @@ export function AddMemberModal({ open, onClose, onDone }: { open: boolean; onClo
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const r = await run(() => api.post<{ id: number }>('/members', { ...f, ...(withPlan ? termBody(term) : {}) }), 'Member added — device user queued');
-    if (r) onDone(r.id);
+    if (!r) return;
+    // Photo is uploaded once the member exists; a failed upload never loses the new member.
+    if (photo) await api.upload(`/members/${r.id}/photo`, photo.blob).catch((err: Error) => toast('error', `Member saved, but the photo failed: ${err.message}`));
+    onDone(r.id);
   };
 
   return (
@@ -214,7 +222,13 @@ export function AddMemberModal({ open, onClose, onDone }: { open: boolean; onClo
       footer={<><button className="btn btn-outline" onClick={onClose}>Cancel</button><button form="add-member" className="btn btn-primary" disabled={busy}>{busy && <Spinner className="w-4 h-4" />}Save member</button></>}>
       <form id="add-member" onSubmit={submit} className="grid md:grid-cols-2 gap-6">
         <div className="space-y-4">
-          <Field label="Full name"><input className="input" value={f.name} onChange={set('name')} required autoFocus /></Field>
+          <div className="flex items-center gap-4">
+            <button type="button" onClick={() => setCamera(true)} title="Take or upload a photo"
+              className="w-20 h-20 shrink-0 rounded-full overflow-hidden border-2 border-dashed border-paper-line dark:border-ink-600 hover:border-lime flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold muted bg-black/[.03] dark:bg-white/[.04]">
+              {photo ? <img src={photo.url} alt="Member" className="w-full h-full object-cover" /> : <><Camera className="w-6 h-6" />Add photo</>}
+            </button>
+            <Field label="Full name" className="flex-1"><input className="input" value={f.name} onChange={set('name')} required autoFocus /></Field>
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Mobile"><input className="input" inputMode="tel" value={f.mobile} onChange={set('mobile')} pattern="[0-9 +]{10,14}" required /></Field>
             <Field label="Member ID" hint="Up to 5 digits or e.g. CGA5 — enrol this ID on the X990"><input className="input uppercase" value={f.essl_id} onChange={(e) => setF({ ...f, essl_id: e.target.value.toUpperCase().replace(/\s/g, '') })} pattern="(?:[1-9][0-9]{0,4}|[A-Za-z]{1,4}[0-9]{1,5})" maxLength={9} title="Up to 5 digits (e.g. 643) or letters + digits (e.g. CGA5)" /></Field>
@@ -233,12 +247,18 @@ export function AddMemberModal({ open, onClose, onDone }: { open: boolean; onClo
           {withPlan && <TermFields plans={plans} value={term} onChange={setTerm} defaultStart={todayLocal()} />}
         </div>
       </form>
+      <PhotoCapture open={camera} onClose={() => setCamera(false)} title="New member photo"
+        onPhoto={(blob) => setPhoto((p) => { if (p) URL.revokeObjectURL(p.url); return { blob, url: URL.createObjectURL(blob) }; })} />
     </Modal>
   );
 }
 
-export function RenewModal({ open, onClose, onDone, memberId, currentEnd, name }: {
-  open: boolean; onClose: () => void; onDone: () => void; memberId: number; currentEnd: string | null; name: string;
+/** POST /members/:id/renew result: the device command to wait on, and a manual door override the renewal removed. */
+export interface RenewResult { device_command: number | null; override_cleared: 'allow' | 'deny' | null; end_date: string }
+
+export function RenewModal({ open, onClose, onDone, memberId, currentEnd, name, override }: {
+  open: boolean; onClose: () => void; onDone: (r?: RenewResult) => void; memberId: number; currentEnd: string | null; name: string;
+  override?: 'allow' | 'deny' | null;
 }) {
   const plans = usePlans();
   const { busy, run } = useAction();
@@ -248,14 +268,15 @@ export function RenewModal({ open, onClose, onDone, memberId, currentEnd, name }
   useEffect(() => { if (open) setTerm({ ...emptyTerm, start_date: defaultStart }); }, [open, defaultStart]);
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const r = await run(() => api.post(`/members/${memberId}/renew`, termBody(term)), 'Renewed — door access restores automatically');
-    if (r) onDone();
+    const r = await run(() => api.post<RenewResult>(`/members/${memberId}/renew`, termBody(term)), 'Renewed — door access follows the new end date');
+    if (r) onDone(r);
   };
   return (
     <Modal open={open} onClose={onClose} title={`Renew ${name}`}
       footer={<><button className="btn btn-outline" onClick={onClose}>Cancel</button><button form="renew" className="btn btn-primary" disabled={busy}>{busy && <Spinner className="w-4 h-4" />}Renew</button></>}>
       <form id="renew" onSubmit={submit}>
         {currentEnd && <p className="text-sm muted mb-4">Current plan ends {date(currentEnd)}. {currentEnd >= today ? 'The new term continues from that date — no days lost.' : 'It has lapsed, so the new term starts today.'}</p>}
+        {override && <p className="text-sm mb-4 rounded-2xl bg-warn/10 text-warn px-3 py-2">Door is set to <b>{override === 'deny' ? 'Blocked' : 'Allowed'} (manual)</b>. Renewing removes the manual setting — the door then follows the new end date automatically.</p>}
         <TermFields plans={plans} value={term} onChange={setTerm} defaultStart={defaultStart} memberId={memberId} />
       </form>
     </Modal>

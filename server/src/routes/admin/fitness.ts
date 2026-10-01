@@ -4,19 +4,24 @@ import type { AppEnv, Env } from '../../env';
 import { tzOffset } from '../../env';
 import { actor, requireAdmin } from '../../lib/auth';
 import { all, assert, audit, first, int, nowIso, run, str } from '../../lib/db';
+import { adminExerciseCatalog, bumpCatalogVersion, countBy, exerciseUseCounts, type AdminExRow } from '../../lib/catalog';
 import { UPLOAD_RE, UPLOAD_TYPES, isImagePath, isVideoUpload, mediaKey, serveExerciseMedia } from '../../lib/exerciseMedia';
 import { addDays, today as todayOf } from '../../lib/dates';
 
 export const fitnessAdmin = new Hono<AppEnv>();
 fitnessAdmin.use('*', requireAdmin());
-
+// Any successful edit makes member workers reload their in-memory catalog.
+fitnessAdmin.use('*', async (c, next) => {
+  await next();
+  if (c.req.method !== 'GET' && c.res.status < 400) await bumpCatalogVersion(c.env);
+});
 fitnessAdmin.get('/overview', async (c) => {
   const today = todayOf(tzOffset(c.env));
   const week = addDays(today, -6);
   const [counts, goals, diets, topFoods, topExercises, recent] = await Promise.all([
     first(c.env.DB, `SELECT
         (SELECT COUNT(*) FROM members WHERE archived=0) AS members,
-        (SELECT COUNT(*) FROM accounts WHERE role='member' AND active=1) AS app_users,
+        (SELECT COUNT(*) FROM accounts WHERE role='member' AND active=1 AND last_login_at IS NOT NULL) AS app_users,
         (SELECT COUNT(*) FROM members WHERE archived=0 AND app_access=0) AS app_off,
         (SELECT COUNT(*) FROM fitness_profiles WHERE onboarded_at IS NOT NULL) AS onboarded,
         (SELECT COUNT(DISTINCT member_id) FROM food_logs WHERE day>=?1) AS food_loggers_7d,
@@ -35,51 +40,52 @@ fitnessAdmin.get('/overview', async (c) => {
   return c.json({ counts, goals, diets: dietCounts, top_foods: topFoods, top_exercises: topExercises, recent });
 });
 
-const EX_SORTS: Record<string, string> = {
-  popular: 'popular DESC, images IS NOT NULL DESC, name',
-  name: 'name COLLATE NOCASE',
-  used: 'uses DESC, name COLLATE NOCASE',
+type ExSorter = (a: AdminExRow & { uses: number }, b: AdminExRow & { uses: number }) => number;
+const byName: ExSorter = (a, b) => a._name.localeCompare(b._name);
+const EX_SORTS: Record<string, ExSorter> = {
+  popular: (a, b) => b.popular - a.popular || Number(b.images != null) - Number(a.images != null) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+  name: byName,
+  used: (a, b) => b.uses - a.uses || byName(a, b),
 };
 
-/** Paginated exercise library. Query: q, body, equipment, photos (yes|no), status (visible|hidden|all), popular (1), sort, page, size */
+/**
+ * Paginated exercise library. Query: q, body, equipment, photos (yes|no), status (visible|hidden|all), popular (1), sort, page, size.
+ * Served from the in-memory admin catalog: 1 D1 row read (catalog version) per request instead of ~15k.
+ */
 fitnessAdmin.get('/exercises', async (c) => {
-  const q = (c.req.query('q') ?? '').trim().toLowerCase().slice(0, 60);
-  const where: string[] = ['1=1'];
-  const params: unknown[] = [];
-  for (const w of q.split(/\s+/).filter(Boolean).slice(0, 4)) { where.push('(lower(e.name) LIKE ? OR lower(e.target) LIKE ?)'); params.push(`%${w}%`, `%${w}%`); }
+  const [catalog, uses] = await Promise.all([adminExerciseCatalog(c.env), exerciseUseCounts(c.env)]);
+  const words = (c.req.query('q') ?? '').trim().toLowerCase().slice(0, 60).split(/\s+/).filter(Boolean).slice(0, 4);
   const body = c.req.query('body');
-  if (body) { where.push('e.body_part=?'); params.push(body); }
   const equipment = c.req.query('equipment');
-  if (equipment) { where.push('e.equipment=?'); params.push(equipment); }
   const photos = c.req.query('photos');
-  if (photos === 'yes') where.push('e.images IS NOT NULL');
-  else if (photos === 'no') where.push('e.images IS NULL');
   const status = c.req.query('status') ?? 'visible';
-  if (status === 'visible') where.push('e.active=1');
-  else if (status === 'hidden') where.push('e.active=0');
-  if (c.req.query('popular') === '1') where.push('e.popular=1');
+  const popularOnly = c.req.query('popular') === '1';
+  const matches = catalog
+    .filter((e) => words.every((w) => e._name.includes(w) || e._target.includes(w))
+      && (!body || e.body_part === body) && (!equipment || e.equipment === equipment)
+      && (photos !== 'yes' || e.images != null) && (photos !== 'no' || e.images == null)
+      && (status !== 'visible' || e.active === 1) && (status !== 'hidden' || e.active === 0)
+      && (!popularOnly || e.popular === 1))
+    .map((e) => ({ ...e, uses: uses.get(e.id) ?? 0 }))
+    .sort(EX_SORTS[c.req.query('sort') ?? 'popular'] ?? EX_SORTS.popular);
   const size = Math.min(100, Math.max(10, int(c.req.query('size')) ?? 24));
   const page = Math.max(1, int(c.req.query('page')) ?? 1);
-  const order = EX_SORTS[c.req.query('sort') ?? 'popular'] ?? EX_SORTS.popular;
-  const w = where.join(' AND ');
-  const base = `FROM exercises e LEFT JOIN (SELECT exercise_id, COUNT(*) AS uses FROM workout_logs GROUP BY exercise_id) u ON u.exercise_id=e.id WHERE ${w}`;
-  const [count, rows, facets] = await Promise.all([
-    first<{ n: number }>(c.env.DB, `SELECT COUNT(*) AS n ${base}`, ...params),
-    all<{ images: string | null }>(c.env.DB, `SELECT e.id, e.name, e.body_part, e.target, e.equipment, e.category, e.level, e.images, e.met, e.tracking, e.popular, e.active, e.source,
-       e.video IS NOT NULL AS has_video, COALESCE(u.uses, 0) AS uses ${base} ORDER BY ${order} LIMIT ? OFFSET ?`, ...params, size, (page - 1) * size),
-    page === 1 ? Promise.all([
-      all(c.env.DB, `SELECT body_part AS value, COUNT(*) AS n FROM exercises GROUP BY body_part ORDER BY n DESC`),
-      all(c.env.DB, `SELECT equipment AS value, COUNT(*) AS n FROM exercises GROUP BY equipment ORDER BY n DESC`),
-      first(c.env.DB, `SELECT COUNT(*) AS total, SUM(active=0) AS hidden, SUM(popular=1) AS popular, SUM(images IS NOT NULL) AS with_photos FROM exercises`),
-      all(c.env.DB, `SELECT target AS value, COUNT(*) AS n FROM exercises WHERE target IS NOT NULL GROUP BY target ORDER BY n DESC`),
-      all(c.env.DB, `SELECT category AS value, COUNT(*) AS n FROM exercises WHERE category IS NOT NULL GROUP BY category ORDER BY n DESC`),
-    ]) : Promise.resolve(null),
-  ]);
-  const total = count?.n ?? 0;
+  const total = matches.length;
   return c.json({
     total, page, size, pages: Math.max(1, Math.ceil(total / size)),
-    exercises: rows.map((r) => ({ ...r, images: r.images ? JSON.parse(r.images) : [] })),
-    facets: facets ? { body_parts: facets[0], equipment: facets[1], stats: facets[2], targets: facets[3], categories: facets[4] } : null,
+    exercises: matches.slice((page - 1) * size, page * size).map(({ _name, _target, ...r }) => ({ ...r, images: r.images ? JSON.parse(r.images) : [] })),
+    facets: page === 1 ? {
+      body_parts: countBy(catalog, (e) => e.body_part),
+      equipment: countBy(catalog, (e) => e.equipment),
+      stats: {
+        total: catalog.length,
+        hidden: catalog.filter((e) => e.active === 0).length,
+        popular: catalog.filter((e) => e.popular === 1).length,
+        with_photos: catalog.filter((e) => e.images != null).length,
+      },
+      targets: countBy(catalog, (e) => e.target, true),
+      categories: countBy(catalog, (e) => e.category, true),
+    } : null,
   });
 });
 
