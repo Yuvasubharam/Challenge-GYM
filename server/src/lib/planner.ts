@@ -11,12 +11,13 @@ import type { Activity, Goal } from './fitness';
 import { round } from './fitness';
 
 // ── Workouts ────────────────────────────────────────────────────────────
-export type DayType = 'full' | 'push' | 'pull' | 'legs' | 'upper' | 'lower' | 'cardio_core' | 'rest';
+/** 'custom' = a day built from the muscles the member asked for (see requestedDay). */
+export type DayType = 'full' | 'push' | 'pull' | 'legs' | 'upper' | 'lower' | 'cardio_core' | 'custom' | 'rest';
 export const FOCUSES: DayType[] = ['full', 'push', 'pull', 'legs', 'upper', 'lower', 'cardio_core'];
 
 export const DAY_TITLE: Record<DayType, string> = {
   full: 'Full body', push: 'Push — chest, shoulders, triceps', pull: 'Pull — back, biceps', legs: 'Legs — quads, hamstrings, glutes, calves',
-  upper: 'Upper body', lower: 'Lower body & core', cardio_core: 'Cardio & core', rest: 'Rest & recovery',
+  upper: 'Upper body', lower: 'Lower body & core', cardio_core: 'Cardio & core', custom: 'Your focus', rest: 'Rest & recovery',
 };
 
 type Role = 'warmup' | 'compound' | 'iso' | 'core' | 'cardio' | 'stretch' | 'walk';
@@ -43,9 +44,13 @@ export const SLOTS: Record<string, SlotDef> = {
   shoulder_press: { role: 'compound', label: 'Shoulder press', body: ['shoulders'], name: /overhead press|shoulder press|military|arnold|seated.*press|standing.*press/i, not: /bench|behind|one arm|single/i },
   shoulder_raise: { role: 'iso', label: 'Shoulder raise', body: ['shoulders'], name: /lateral raise|front raise|rear delt|reverse fly|face pull|upright row/i, not: /stretch|lying|incline/i },
   triceps:        { role: 'iso', label: 'Triceps', target: ['triceps'], name: /pushdown|extension|kickback|skull|dip|close.?grip/i, not: /one arm|single|stretch/i },
+  triceps_2:      { role: 'iso', label: 'Triceps (overhead / dip)', target: ['triceps'], name: /overhead|dip|skull|close.?grip|lying.*extension/i, not: /one arm|single|stretch/i },
   vertical_pull:  { role: 'compound', label: 'Vertical pull', target: ['lats'], name: /pull-?up|chin-?up|pulldown|pull-down/i, not: /one arm|single|kneeling|straight arm|behind/i },
   row:            { role: 'compound', label: 'Row', body: ['back'], name: /row/i, not: /upright|one arm|single|inverted/i },
   rear_back:      { role: 'iso', label: 'Upper / lower back', body: ['back', 'shoulders'], name: /face pull|reverse fly|rear delt|shrug|back extension|hyperextension|superman/i, not: /stretch|clean|sled/i },
+  lat_2:          { role: 'iso', label: 'Lats (2nd)', target: ['lats'], name: /pulldown|pull-down|pullover|straight.?arm|chin-?up|pull-?up/i, not: /behind|kneeling|one arm|single/i },
+  upper_back:     { role: 'iso', label: 'Upper back', body: ['back', 'shoulders'], name: /face pull|reverse fly|rear delt|shrug|seated.*row|cable.*row|t-?bar/i, not: /stretch|clean|sled|one arm|single/i },
+  lower_back:     { role: 'iso', label: 'Lower back', body: ['back', 'upper legs', 'waist'], name: /back extension|hyperextension|superman|good morning|bird dog|reverse hyper/i, not: /stretch|pins|hanging|stiff|chain|band/i },
   biceps:         { role: 'iso', label: 'Biceps curl', target: ['biceps'], name: CURLS, not: /hammer|one arm|single|reverse|drag|spider|zottman/i },
   biceps_2:       { role: 'iso', label: 'Biceps (hammer / preacher)', target: ['biceps'], name: /hammer|preacher|concentration|incline/i, not: /one arm|single/i },
   squat:          { role: 'compound', label: 'Squat / leg press', body: ['upper legs'], name: /squat|leg press/i, not: /jump|pistol|sissy|overhead|one leg|single|hack squat machine|split|stretch|sumo/i },
@@ -54,6 +59,7 @@ export const SLOTS: Record<string, SlotDef> = {
   ham_curl:       { role: 'iso', label: 'Hamstring curl', target: ['hamstrings'], name: /leg curl/i, not: /one leg|single|ball/i },
   quad_iso:       { role: 'iso', label: 'Leg extension', body: ['upper legs'], name: /leg extension/i, not: /one leg|single/i },
   calves:         { role: 'iso', label: 'Calves', target: ['calves'], name: /calf raise|calf press/i, not: /one leg|single|donkey/i },
+  glute:          { role: 'iso', label: 'Glutes', body: ['upper legs'], name: /hip thrust|glute bridge|kickback|hip abduction|donkey kick|clamshell/i, not: /stretch|one leg|single|ham raise/i },
   core:           { role: 'core', label: 'Core', body: ['waist'], name: CORE_MOVES, not: /stretch|weighted|decline|hanging|dragon/i },
   core_2:         { role: 'core', label: 'Core (2nd)', body: ['waist'], name: CORE_MOVES, not: /stretch|weighted|decline|dragon/i },
   cardio:         { role: 'cardio', label: 'Cardio', body: ['cardio'], time: true, name: CARDIO_MACHINES, not: /swim|football|zumba|yoga/i },
@@ -70,7 +76,120 @@ export const TEMPLATES: Record<DayType, string[]> = {
   upper:       ['warmup', 'chest_press', 'row', 'shoulder_press', 'vertical_pull', 'biceps', 'triceps', 'cardio', 'stretch'],
   lower:       ['warmup', 'squat', 'hinge', 'lunge', 'ham_curl', 'calves', 'core', 'core_2', 'cardio', 'stretch'],
   cardio_core: ['warmup', 'core', 'core_2', 'cardio', 'stretch'],
+  custom:      ['warmup', 'stretch'], // filled from the request by requestedDay()
   rest:        ['walk', 'stretch'],
+};
+
+// ── The member's request → muscles to train, joints to protect ─────────
+export type Muscle = 'chest' | 'lats' | 'upper_back' | 'lower_back' | 'shoulders' | 'biceps' | 'triceps' | 'quads' | 'hamstrings' | 'glutes' | 'calves' | 'abs' | 'cardio';
+export type Joint = 'knees' | 'shoulders' | 'lower_back' | 'wrists';
+
+export const MUSCLES: Record<Muscle, { label: string; slots: string[] }> = {
+  chest:      { label: 'chest', slots: ['chest_press', 'chest_2'] },
+  lats:       { label: 'lats', slots: ['vertical_pull', 'lat_2'] },
+  upper_back: { label: 'upper back', slots: ['row', 'upper_back'] },
+  lower_back: { label: 'lower back', slots: ['lower_back', 'hinge'] },
+  shoulders:  { label: 'shoulders', slots: ['shoulder_press', 'shoulder_raise'] },
+  biceps:     { label: 'biceps', slots: ['biceps', 'biceps_2'] },
+  triceps:    { label: 'triceps', slots: ['triceps', 'triceps_2'] },
+  quads:      { label: 'quads', slots: ['squat', 'quad_iso', 'lunge'] },
+  hamstrings: { label: 'hamstrings', slots: ['hinge', 'ham_curl'] },
+  glutes:     { label: 'glutes', slots: ['glute', 'lunge'] },
+  calves:     { label: 'calves', slots: ['calves'] },
+  abs:        { label: 'abs & core', slots: ['core', 'core_2'] },
+  cardio:     { label: 'cardio', slots: ['cardio'] },
+};
+export const JOINT_LABEL: Record<Joint, string> = { knees: 'knees', shoulders: 'shoulders', lower_back: 'lower back', wrists: 'wrists' };
+
+/** Slots dropped and exercise names excluded when a joint hurts. */
+const JOINT_GUARD: Record<Joint, { slots: string[]; names: RegExp }> = {
+  knees:      { slots: ['squat', 'lunge', 'quad_iso'], names: /squat|lunge|step-?up|jump|leg extension|leg press|run|sprint|stair|skip|burpee|box/i },
+  shoulders:  { slots: ['shoulder_press', 'triceps_2'], names: /overhead|military|arnold|behind|upright row|dip|snatch|handstand|pull-?up|chin-?up/i },
+  lower_back: { slots: ['hinge', 'lower_back'], names: /deadlift|good morning|bent.?over|hyperextension|back extension|superman|t-?bar|clean|swing|sit-?up/i },
+  wrists:     { slots: [], names: /push-?up|dip|skull|front squat|clean|barbell curl/i },
+};
+
+// Keyword reading of the request (works without AI; Clef answers are merged on top).
+const MUSCLE_WORDS: [RegExp, Muscle[]][] = [
+  [/\bchest|\bpecs?\b|pectoral/i, ['chest']],
+  [/\blats?\b|latissimus|\bwings?\b|v[- ]?taper|back width|wider back/i, ['lats']],
+  [/upper[- ]back|\btraps?\b|trapezius|rhomboid|mid(dle)?[- ]back|rear delt/i, ['upper_back']],
+  [/lower[- ]back|erector|lumbar/i, ['lower_back']],
+  [/shoulders?|\bdelts?\b|deltoid/i, ['shoulders']],
+  [/\bbiceps?\b|\bbis\b/i, ['biceps']],
+  [/\btriceps?\b|\btris\b/i, ['triceps']],
+  [/\barms?\b/i, ['biceps', 'triceps']],
+  [/\bquads?\b|quadriceps|thighs?/i, ['quads']],
+  [/hamstrings?|\bhams\b/i, ['hamstrings']],
+  [/glutes?|\bbutt\b|buttocks|\bhips?\b/i, ['glutes']],
+  [/\bcalf\b|calves/i, ['calves']],
+  [/\blegs?\b|leg day|lower body/i, ['quads', 'hamstrings', 'glutes', 'calves']],
+  [/\babs\b|abdominal|\bcore\b|belly|stomach|six[- ]?pack|\bwaist\b|obliques?/i, ['abs']],
+  [/cardio|stamina|endurance|\bhiit\b|running|conditioning/i, ['cardio']],
+  [/push day|\bpush\b workout/i, ['chest', 'shoulders', 'triceps']],
+  [/pull day|\bpull\b workout/i, ['lats', 'upper_back', 'biceps']],
+  [/upper body/i, ['chest', 'lats', 'upper_back', 'shoulders', 'biceps', 'triceps']],
+];
+const JOINT_WORDS: [RegExp, Joint][] = [
+  [/knees?/i, 'knees'], [/shoulders?|rotator/i, 'shoulders'], [/lower[- ]back|\bback\b|spine|disc|sciatica|lumbar/i, 'lower_back'], [/wrists?/i, 'wrists'],
+];
+const PAIN = /pain|injur|hurt|sore|ache|strain|sprain|surgery|operat|problem|torn|tear|slip|avoid|can'?t|cannot|\bno\b|\bnot\b|without/i;
+
+/** Muscles the member asks to train and joints they mention as painful, read from free text. */
+export function readRequest(text: string | null | undefined): { muscles: Muscle[]; avoid: Joint[] } {
+  const muscles = new Set<Muscle>();
+  const avoid = new Set<Joint>();
+  for (const clause of (text ?? '').split(/[.;,\n]|\bbut\b|\bexcept\b/i)) {
+    if (!clause.trim()) continue;
+    if (PAIN.test(clause)) {
+      for (const [re, j] of JOINT_WORDS) if (re.test(clause)) avoid.add(j);
+      continue; // "lower back pain" is not a request to train the lower back
+    }
+    for (const [re, ms] of MUSCLE_WORDS) if (re.test(clause)) ms.forEach((m) => muscles.add(m));
+    // A plain "back" means the whole back.
+    if (/\bback\b/i.test(clause) && !/upper[- ]back|lower[- ]back|back width|wider back/i.test(clause)) ['lats', 'upper_back', 'lower_back'].forEach((m) => muscles.add(m as Muscle));
+  }
+  return { muscles: [...muscles], avoid: [...avoid] };
+}
+
+/**
+ * The slots of a day built from requested muscles: every muscle gets its main slot, then second
+ * slots in turn, aiming for 5–7 strength exercises (compounds first). Core and cardio are added only
+ * when asked for (cardio also when the goal prescribes it); warm-up and stretch always.
+ */
+export function requestedDay(muscles: Muscle[], goal: Goal, avoid: Joint[] = []): string[] {
+  const blocked = new Set(avoid.flatMap((j) => JOINT_GUARD[j].slots));
+  const strengthMuscles = muscles.filter((m) => m !== 'abs' && m !== 'cardio');
+  const lists = strengthMuscles.map((m) => MUSCLES[m].slots.filter((s) => !blocked.has(s)));
+  const max = strengthMuscles.length >= 5 ? 8 : 7;
+  const picked: string[] = [];
+  for (let round = 0; picked.length < max && lists.some((l) => l.length > round); round++) {
+    for (const l of lists) if (l[round] && !picked.includes(l[round]) && picked.length < max) picked.push(l[round]);
+  }
+  const rank: Record<string, number> = { compound: 0, iso: 1 };
+  const strength = picked.sort((a, b) => rank[SLOTS[a].role] - rank[SLOTS[b].role]);
+  const core = muscles.includes('abs') ? ['core', 'core_2'] : [];
+  const cardio = muscles.includes('cardio') || GOAL_RX[goal].cardio > 0 ? ['cardio'] : [];
+  return ['warmup', ...strength, ...core, ...cardio, 'stretch'];
+}
+
+/** Title for a requested day, e.g. "Back — lats, upper back, lower back". */
+export function requestedTitle(muscles: Muscle[]): string {
+  const set = new Set(muscles);
+  const back = (['lats', 'upper_back', 'lower_back'] as Muscle[]).every((m) => set.has(m));
+  const legs = (['quads', 'hamstrings', 'glutes'] as Muscle[]).every((m) => set.has(m));
+  const head = back && muscles.length <= 4 ? 'Back' : legs && muscles.length <= 5 ? 'Legs' : muscles.length === 1 ? MUSCLES[muscles[0]].label[0].toUpperCase() + MUSCLES[muscles[0]].label.slice(1) : 'Your focus';
+  return `${head} — ${muscles.map((m) => MUSCLES[m].label).join(', ')}`;
+}
+
+/** Exercise names to leave out for painful joints. */
+export const avoidPattern = (avoid: Joint[]): RegExp | null =>
+  avoid.length ? new RegExp(avoid.map((j) => JOINT_GUARD[j].names.source).join('|'), 'i') : null;
+
+/** Drop slots a painful joint rules out (template days), keeping warm-up/stretch. */
+export const guardSlots = (slots: string[], avoid: Joint[]) => {
+  const blocked = new Set(avoid.flatMap((j) => JOINT_GUARD[j].slots));
+  return slots.filter((s) => !blocked.has(s));
 };
 
 /** Which day types to train for N training days (balanced: every muscle group each week). */
@@ -160,10 +279,10 @@ export function matchesSlot(e: ExCandidate, def: SlotDef): boolean {
 const HARD_FOR_BEGINNERS = /pull-?up|chin-?up|chest dip|triceps dip|^dips?\b|hanging|muscle.?up|pistol|handstand|dragon/i;
 
 /** Best `n` candidates per slot, ranked by suitability. */
-export function slotCandidates(catalog: ExCandidate[], slots: string[], n = 8, beginner = false): Record<string, ExCandidate[]> {
+export function slotCandidates(catalog: ExCandidate[], slots: string[], n = 8, beginner = false, exclude: RegExp | null = null): Record<string, ExCandidate[]> {
   const out: Record<string, ExCandidate[]> = {};
   for (const slot of slots) {
-    const all = catalog.filter((e) => matchesSlot(e, SLOTS[slot]));
+    const all = catalog.filter((e) => matchesSlot(e, SLOTS[slot]) && !(exclude && exclude.test(e.name)));
     const easy = beginner ? all.filter((e) => !HARD_FOR_BEGINNERS.test(e.name)) : all;
     out[slot] = (easy.length >= 2 ? easy : all)
       .sort((a, b) => exerciseScore(b) - exerciseScore(a) || (a.name < b.name ? -1 : 1))
@@ -176,16 +295,17 @@ export function slotCandidates(catalog: ExCandidate[], slots: string[], n = 8, b
  * Final exercise per slot for one day: the AI's pick when it is a valid candidate and not already
  * used that day, otherwise the next unused candidate (rotated by `variant` so repeated day types differ).
  */
-export function resolvePicks(slots: string[], cands: Record<string, ExCandidate[]>, aiPicks: Record<string, unknown> | undefined, variant = 0,
+export function resolvePicks(slots: string[], cands: Record<string, ExCandidate[]>, aiPicks: Record<string, unknown> | unknown[] | undefined, variant = 0,
   previous: Record<string, string> = {}): { slot: string; ex: ExCandidate }[] {
   const used = new Set<string>();
   const out: { slot: string; ex: ExCandidate }[] = [];
-  for (const slot of slots) {
+  for (const [pos, slot] of slots.entries()) {
     const list = cands[slot] ?? [];
     if (!list.length) continue;
     // Main compound lifts repeat across same-type days (progressive overload); everything else rotates.
     const avoid = SLOTS[slot].role !== 'compound' && list.length > 1 ? previous[slot] : undefined;
-    const want = aiPicks?.[slot];
+    // Picks come keyed by slot (chat models) or by position in the day (Clef answers).
+    const want = Array.isArray(aiPicks) ? aiPicks[pos] : aiPicks?.[slot];
     let ex = typeof want === 'string' && want !== avoid ? list.find((e) => e.id === want && !used.has(e.id)) : undefined;
     if (!ex) {
       const free = list.filter((e) => !used.has(e.id) && e.id !== avoid);
@@ -356,6 +476,40 @@ export function mealIssues(items: PlannedFood[]): string[] {
   for (const i of items) perFood.set(i.food.id, (perFood.get(i.food.id) ?? new Set()).add(i.meal ?? ''));
   for (const [id, meals] of perFood) if (meals.size > 2) out.push(`${items.find((i) => i.food.id === id)!.food.name} is used in ${meals.size} meals — max 2`);
   return out;
+}
+
+// ── Meal roles (what Clef-flash fills: one dish per role) ───────────────
+const SNACK = /fruit|banana|apple|orange|papaya|watermelon|grapes|mango|guava|pomegranate|nuts?\b|almond|peanut|cashew|walnut|dates|sprout|chana|makhana|buttermilk|chaas|lassi|milk|whey|protein|curd|yogurt|corn|coconut water|egg|tea|coffee|chaat|dhokla|khaman|oat/i;
+const BREAKFAST_SIDE = /curd|yogurt|milk|banana|apple|fruit|papaya|orange|sambar|egg|sprout|peanut|almond/i;
+const SIDE_DISH = /sabzi|poriyal|thoran|kootu|avial|salad|vegetable|veg|raita|bhindi|beans|cabbage|aloo|gobi|baingan|palak|saag|curd|buttermilk|chaas|rasam/i;
+const PROTEIN_DISH = /paneer|egg|omelette|bhurji|chicken|fish|mutton|prawn|crab|keema|soya|tofu|sprout|chana|rajma|dal|curd|raita|kebab|tikka/i;
+
+export interface MealRole { meal: string; role: string; label: string; options: FoodCandidate[] }
+
+/**
+ * The plate for each meal as roles — breakfast: main + side; lunch/dinner: grain + cooked dish +
+ * protein + vegetable side; snacks: two picks. Options come from the day's pool (already ranked),
+ * at most `max` each, so the decision model only ever chooses between suitable dishes.
+ */
+export function mealRoles(pool: FoodCandidate[], max = 16): MealRole[] {
+  const grain = (f: FoodCandidate) => GRAIN.test(f.name);
+  const pick = (test: (f: FoodCandidate) => boolean) => pool.filter(test).slice(0, max);
+  const dish = (f: FoodCandidate) => COOKED.test(f.name) && !grain(f);
+  const protein = (f: FoodCandidate) => (isProteinFood(f) || PROTEIN_DISH.test(f.name)) && !grain(f);
+  const roles: MealRole[] = [
+    { meal: 'breakfast', role: 'main', label: 'breakfast main dish (idli, dosa, poha, upma, oats, paratha, eggs…)', options: pick((f) => BREAKFAST_DISH.test(f.name) || /oat|muesli|bread/i.test(f.name)) },
+    { meal: 'breakfast', role: 'side', label: 'breakfast side (sambar, curd, milk, fruit, eggs, sprouts…)', options: pick((f) => BREAKFAST_SIDE.test(f.name) && !BREAKFAST_DISH.test(f.name) && !/soup|rasam|curry/i.test(f.name)) },
+    { meal: 'lunch', role: 'grain', label: 'lunch grain (rice, roti, millet)', options: pick((f) => LUNCH_GRAIN.test(f.name)) },
+    { meal: 'lunch', role: 'dish', label: 'lunch cooked dish (dal, curry, sambar…)', options: pick(dish) },
+    { meal: 'lunch', role: 'protein', label: 'lunch protein item', options: pick(protein) },
+    { meal: 'lunch', role: 'side', label: 'lunch vegetable side / curd', options: pick((f) => SIDE_DISH.test(f.name) && !grain(f)) },
+    { meal: 'dinner', role: 'grain', label: 'dinner grain (roti, rice, millet, dosa) — lighter than lunch', options: pick(grain) },
+    { meal: 'dinner', role: 'dish', label: 'dinner cooked dish (dal, curry, sabzi…)', options: pick(dish) },
+    { meal: 'dinner', role: 'protein', label: 'dinner protein item', options: pick(protein) },
+    { meal: 'snacks', role: 'snack1', label: 'evening snack (fruit, sprouts, nuts, buttermilk, milk, whey…)', options: pick((f) => SNACK.test(f.name) && !COOKED.test(f.name) && !/soup/i.test(f.name)) },
+    { meal: 'snacks', role: 'snack2', label: 'second snack, different from the first (protein-rich if possible)', options: pick((f) => SNACK.test(f.name) && !COOKED.test(f.name) && !/soup/i.test(f.name)) },
+  ];
+  return roles.filter((r) => r.options.length >= 2);
 }
 
 /** The same food listed twice in one meal becomes one item with the amounts added. */

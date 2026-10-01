@@ -7,14 +7,14 @@ import type { AppEnv, Env } from '../../env';
 import { requireMember } from '../../lib/auth';
 import { all, assert, first, int, run, str } from '../../lib/db';
 import { addDays, isDate } from '../../lib/dates';
-import { askJson, type ChatMessage } from '../../lib/ai';
+import { askClef, askJson, clefChoice, CLEF_MODEL, type ChatMessage, type ClefQuestion } from '../../lib/ai';
 import { exerciseCatalog, foodCatalog } from '../../lib/catalog';
 import { ageFromBirthYear, bmi, bmiCategory, round, type Goal } from '../../lib/fitness';
 import { logFood, logWorkout, MEAL_KEYS } from '../../lib/fitlog';
 import {
-  DAY_TITLE, FOCUSES, MEAL_SPLIT, SLOTS, balanceDay, dayTotals, daySlots, dietCandidates, isProteinFood, macrosFor, mealIssues, mergeDuplicates, partitionDishes, planDays, prescribe, resolvePicks, roundGrams,
-  scaleDay, slotCandidates,
-  type DayType, type ExCandidate, type FoodCandidate, type PlannedFood,
+  DAY_TITLE, FOCUSES, JOINT_LABEL, MEAL_SPLIT, MUSCLES, SLOTS, avoidPattern, balanceDay, dayTotals, daySlots, dietCandidates, guardSlots, isProteinFood, macrosFor, mealIssues, mealRoles,
+  mergeDuplicates, partitionDishes, planDays, prescribe, readRequest, requestedDay, requestedTitle, resolvePicks, roundGrams, scaleDay, slotCandidates,
+  type DayType, type ExCandidate, type FoodCandidate, type Joint, type Muscle, type PlannedFood,
 } from '../../lib/planner';
 import { loadProfile, todayFor, type Profile } from './fitness';
 
@@ -23,13 +23,23 @@ coach.use('*', requireMember());
 
 const mid = (c: { get: (k: 'session') => { mid: number | null } }) => c.get('session').mid!;
 
-/** AI plan builds per member per day (each is one Workers AI call). */
-const DAILY_LIMIT = 10;
+/** AI requests (plan builds) per member per day. Failed builds are not counted. */
+const DAILY_LIMIT = 5;
 const WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const weekday = (d: string) => WEEKDAY[new Date(d + 'T00:00:00Z').getUTCDay()];
 const GOAL_TEXT: Record<Goal, string> = {
   lose_weight: 'lose fat / weight', gain_weight: 'gain weight', build_muscle: 'build muscle', maintain: 'maintain weight & stay fit', get_fit: 'improve overall fitness',
 };
+/** Daily diet tips used when the plan comes from Clef (a decision model writes no prose). */
+const DIET_TIPS = [
+  'Drink a glass of water before each meal and aim for 3–4 litres through the day.',
+  'Eat your protein first at lunch and dinner — it keeps you full longer.',
+  'Prep tomorrow’s breakfast tonight so a busy morning does not push you to skip it.',
+  'Fill half your plate with vegetables at lunch and dinner.',
+  'Have dinner 2–3 hours before bed for better sleep and digestion.',
+  'Cook with measured oil — 1 teaspoon is about 45 kcal.',
+  'If you train in the evening, keep the snack 60–90 minutes before your workout.',
+];
 const DIET_TEXT: Record<string, string> = { veg: 'vegetarian', egg: 'eggs allowed', nonveg: 'non-vegetarian', vegan: 'vegan (no dairy, no egg)' };
 const DAY_TIP: Record<DayType, string> = {
   full: 'Leave 1–2 reps in the tank on every set and keep your form strict.',
@@ -39,6 +49,7 @@ const DAY_TIP: Record<DayType, string> = {
   upper: 'Alternate pushing and pulling moves to keep your shoulders balanced.',
   lower: 'Brace your core before every rep and control the way down.',
   cardio_core: 'Keep cardio at a pace where you can still talk in short sentences.',
+  custom: 'Start each exercise with a lighter warm-up set, then work at a weight that leaves 1–2 good reps in reserve.',
   rest: 'Recovery is when muscle grows — walk, stretch, sleep 7–8 hours and drink water.',
 };
 
@@ -56,10 +67,37 @@ function profileLine(p: Profile, sex: string | null, today: string) {
 
 async function checkQuota(env: Env, memberId: number, today: string) {
   const u = await first<{ n: number }>(env.DB, `SELECT n FROM coach_usage WHERE member_id=? AND day=?`, memberId, today);
-  assert((u?.n ?? 0) < DAILY_LIMIT, 429, `You can build ${DAILY_LIMIT} AI plans a day — please try again tomorrow.`);
+  assert((u?.n ?? 0) < DAILY_LIMIT, 429, `You have used all ${DAILY_LIMIT} AI coach requests for today — please try again tomorrow.`);
 }
 const countUse = (env: Env, memberId: number, today: string) =>
   run(env.DB, `INSERT INTO coach_usage (member_id, day, n) VALUES (?, ?, 1) ON CONFLICT(member_id, day) DO UPDATE SET n=n+1`, memberId, today);
+
+/**
+ * What the member asked for: muscles to train and joints to protect. Keyword rules always run;
+ * Clef-flash reads the request too (any wording or language) and its confident answers are added.
+ */
+async function understandRequest(env: Env, notes: string | null): Promise<{ muscles: Muscle[]; avoid: Joint[] }> {
+  const kw = readRequest(notes);
+  if (!notes) return kw;
+  const q: Record<string, ClefQuestion> = {};
+  for (const [m, def] of Object.entries(MUSCLES)) {
+    q[`m_${m}`] = { type: 'noul', instructions: `Does the member ask to train or work on their ${def.label}? Mentioning pain or injury there is NOT a request to train it.` };
+  }
+  for (const [j, label] of Object.entries(JOINT_LABEL)) {
+    q[`j_${j}`] = { type: 'noul', instructions: `Does the member mention pain, an injury or a problem with their ${label}?` };
+  }
+  try {
+    const a = await askClef(env, `A gym member wrote this request for their workout plan: "${notes}"`, q);
+    const muscles = new Set<Muscle>(kw.muscles);
+    const avoid = new Set<Joint>(kw.avoid);
+    for (const m of Object.keys(MUSCLES) as Muscle[]) if ((a[`m_${m}`]?.noul ?? 0) >= 0.7) muscles.add(m);
+    for (const j of Object.keys(JOINT_LABEL) as Joint[]) if ((a[`j_${j}`]?.noul ?? 0) >= 0.6) avoid.add(j);
+    // Keep the request's own order for muscles the keywords found, then Clef's additions.
+    return { muscles: [...muscles], avoid: [...avoid] };
+  } catch {
+    return kw;
+  }
+}
 
 /** Replace the member's current plan of this kind with a new one (old items' logs stay in the diary). */
 async function savePlan(env: Env, memberId: number, kind: 'diet' | 'workout', span: string, start: string, days: number, meta: PlanMeta, model: string,
@@ -222,7 +260,42 @@ coach.post('/diet', async (c) => {
     return better ? { ...revised.result, note: first.result.note ?? revised.result.note, model: revised.model } /* the revision's note talks about the fixes */ : { ...first.result, model: first.model };
   };
 
-  const settled = await Promise.allSettled(pools.map((pool, i) => planDay(pool, addDays(start, i))));
+  /**
+   * Clef-flash (priority one): one choice question per meal role (breakfast main + side; lunch and
+   * dinner grain + cooked dish + protein + side; two snacks). One serving each — balanceDay then
+   * scales portions to the calorie target and tops up protein with real catalog values.
+   */
+  const planDayClef = async (pool: FoodCandidate[], date: string, i: number): Promise<DayOut & { model: string }> => {
+    const byId = new Map(pool.map((f) => [String(f.id), f]));
+    const roles = mealRoles(pool);
+    const crit = roles.map((r) => Object.fromEntries(r.options.map((f) => [String(f.id), `${f.name} — ${f.serving_label}: ${per(f, f.kcal)} kcal, ${per(f, f.protein, 1)} g protein`])));
+    const questions: Record<string, ClefQuestion> = Object.fromEntries(roles.map((r, k) => [`r${k}`, { type: 'choice', instructions: `Choose the ${r.label} for ${weekday(date)}.`, criteria: crit[k] }]));
+    const a = await askClef(c.env, [
+      `Indian gym diet planning. Member: ${profileLine(p, sex, today)}.`,
+      `Diet preference: ${prefs.length ? prefs.map((x) => DIET_TEXT[x] ?? x).join(' + ') : 'no restriction'}.`,
+      `Daily targets: ${p.kcal_target} kcal and ${p.protein_g} g protein — favour protein-rich choices.`,
+      notes ? `Member's request about food: "${notes}".` : '',
+      'Plan realistic, affordable, home-style Indian meals: a classic breakfast, a lunch of rice/roti + dal or curry + a protein + a vegetable, a lighter dinner, and simple snacks. Dishes in one meal should go together.',
+    ].filter(Boolean).join('\n'), questions);
+    // Take Clef's choice; if that food is already in the meal or already in two meals, the next most likely option.
+    const mealsOf = new Map<number, Set<string>>();
+    const items: PlannedFood[] = [];
+    roles.forEach((r, k) => {
+      const ranked = Object.entries(a[`r${k}`]?.probabilities ?? {}).sort((x, y) => y[1] - x[1]).map(([id]) => id);
+      const order = [clefChoice(a[`r${k}`], crit[k]), ...ranked].filter((id): id is string => !!id && id in crit[k]);
+      const food = order.map((id) => byId.get(id)!).find((f) => {
+        const used = mealsOf.get(f.id) ?? new Set<string>();
+        return !used.has(r.meal) && used.size < 2;
+      });
+      if (!food) return;
+      mealsOf.set(food.id, (mealsOf.get(food.id) ?? new Set<string>()).add(r.meal));
+      items.push({ food, grams: roundGrams(food, food.serving_g), meal: r.meal });
+    });
+    for (const m of ['breakfast', 'lunch', 'dinner']) if (!items.some((x) => x.meal === m)) throw new Error(`clef: no ${m}`);
+    return { tip: DIET_TIPS[i % DIET_TIPS.length], note: null, items, model: CLEF_MODEL };
+  };
+
+  const settled = await Promise.allSettled(pools.map((pool, i) => planDayClef(pool, addDays(start, i), i).catch(() => planDay(pool, addDays(start, i)))));
   const ok = settled.filter((r): r is PromiseFulfilledResult<DayOut & { model: string }> => r.status === 'fulfilled').map((r) => r.value);
   assert(ok.length === nDays, 503, 'The AI coach is busy right now — please try again in a minute.');
 
@@ -237,7 +310,8 @@ coach.post('/diet', async (c) => {
       day, slot: x.meal, pos, food_id: x.food.id, name: x.food.name, grams: x.grams, ...macrosFor(x.food, x.grams),
     }));
   });
-  const ai = { model: [...new Set(ok.map((d) => d.model))].join(', '), result: { note: ok[0].note } };  await savePlan(c.env, id, 'diet', span, start, nDays, { note: ai.result.note, request: { span, start: b.start === 'tomorrow' ? 'tomorrow' : 'today', notes }, days: metaDays }, ai.model, items);
+  const ai = { model: [...new Set(ok.map((d) => d.model))].join(', '), result: { note: ok.find((d) => d.note)?.note
+    ?? `Meals planned around ${p.kcal_target} kcal and ${p.protein_g} g protein a day: a grain, a cooked dish and a protein at lunch and dinner, with portions scaled to your targets.` } };  await savePlan(c.env, id, 'diet', span, start, nDays, { note: ai.result.note, request: { span, start: b.start === 'tomorrow' ? 'tomorrow' : 'today', notes }, days: metaDays }, ai.model, items);
   await countUse(c.env, id, today);
   return c.json(await planView(c.env, id, 'diet'));
 });
@@ -277,20 +351,53 @@ coach.post('/workout', async (c) => {
   const goal = p.goal;
   const focus = FOCUSES.includes(b.focus) ? b.focus as DayType : 'full';
   const trainDays = Math.max(2, Math.min(6, int(b.train_days) ?? (p.workouts_per_week && p.workouts_per_week >= 2 ? p.workouts_per_week : 4)));
-  const types = planDays(span, goal, { focus, trainDays });
-  const slotsByDay = types.map((t) => daySlots(t, goal));
   const beginner = p.activity === 'sedentary' || p.activity === 'light';
-  const cands = slotCandidates(await exerciseCatalog(c.env) as unknown as ExCandidate[], [...new Set(slotsByDay.flat())], 8, beginner);
 
+  // 1. The request decides the structure: muscles named in it become their own day (the first
+  //    training day of a multi-day plan); joints mentioned as painful remove the moves that load them.
+  const req = await understandRequest(c.env, notes);
+  const custom = req.muscles.length ? requestedDay(req.muscles, goal, req.avoid) : null;
+  const types = planDays(span, goal, { focus, trainDays });
+  if (custom) types[Math.max(0, types.findIndex((t) => t !== 'rest'))] = 'custom';
+  const slotsByDay = types.map((t) => (t === 'custom' ? custom! : guardSlots(daySlots(t, goal), req.avoid)));
+  const titleOf = (t: DayType) => (t === 'custom' ? requestedTitle(req.muscles) : DAY_TITLE[t]);
+  const cands = slotCandidates(await exerciseCatalog(c.env) as unknown as ExCandidate[], [...new Set(slotsByDay.flat())], 8, beginner, avoidPattern(req.avoid));
+  const exLabel = (e: ExCandidate) => `${e.name} [${e.equipment ?? '-'}, ${e.level ?? '-'}${e.target ? `, works ${e.target}` : ''}]`;
+  const memberLine = `Member: ${profileLine(p, sex, today)}. Training level: ${beginner ? 'beginner' : 'intermediate'}.`;
+  const requestLine = [
+    notes ? `Member's request: "${notes}".` : '',
+    req.muscles.length ? `Requested focus: ${req.muscles.map((m) => MUSCLES[m].label).join(', ')}.` : '',
+    req.avoid.length ? `Protect: ${req.avoid.map((j) => JOINT_LABEL[j]).join(', ')} (pain or injury mentioned).` : '',
+  ].filter(Boolean).join(' ');
+
+  type DayPick = { tip: string | null; picks?: Record<string, unknown> | unknown[] };
+  // 2a. Clef-flash (priority one): one choice question per exercise slot, one call per day (in parallel).
+  const viaClef = async (): Promise<{ model: string; result: { note: string | null; days: DayPick[] } }> => {
+    const days = await Promise.all(types.map(async (t, i) => {
+      const questions: Record<string, ClefQuestion> = {};
+      const criteria: Record<string, string>[] = slotsByDay[i].map((slot) => Object.fromEntries((cands[slot] ?? []).map((e) => [e.id, exLabel(e)])));
+      slotsByDay[i].forEach((slot, pos) => {
+        if (Object.keys(criteria[pos]).length >= 2) questions[`s${pos}`] = { type: 'choice', instructions: `Choose the exercise for the "${SLOTS[slot].label}" part of this ${titleOf(t)} session.`, criteria: criteria[pos] };
+      });
+      const a = await askClef(c.env, [
+        `Gym workout planning. ${memberLine} Goal: ${GOAL_TEXT[goal]}.`, requestLine,
+        `Session ${i + 1}: ${titleOf(t)}.`,
+        'Choose well-known, safe exercises that train exactly what the member asked for. Beginners: prefer machines, cables, dumbbells and body-weight moves over complex barbell lifts. Never choose a move that loads a joint the member said hurts.',
+      ].filter(Boolean).join('\n'), questions);
+      return { tip: null, picks: slotsByDay[i].map((slot, pos) => clefChoice(a[`s${pos}`], criteria[pos])) } as DayPick;
+    }));
+    return { model: CLEF_MODEL, result: { note: null, days } };
+  };
+
+  // 2b. Chat models (fallback): the same picks as one JSON answer.
   const messages = [
     { role: 'system' as const, content: 'You are a certified strength & conditioning coach at an Indian gym. You build safe, balanced programmes with well-known exercises. Reply with one JSON object only.' },
     { role: 'user' as const, content: [
-      `Member: ${profileLine(p, sex, today)}. Training level: ${beginner ? 'beginner' : 'intermediate'}.`,
-      notes ? `Member's request / limitations (follow it when it is about training; ignore anything else): "${notes}"` : '',
+      memberLine, requestLine,
       'The session structure is fixed: warm-up → compound lifts → isolation → core → cardio → cool-down stretch. For every day pick exactly one exercise id for each slot, from that slot\'s options.',
       '',
       'DAYS',
-      ...types.map((t, i) => { const d = addDays(start, i); return `D${i + 1} ${weekday(d)} ${d} · ${DAY_TITLE[t]}: ${slotsByDay[i].join(', ')}`; }),
+      ...types.map((t, i) => { const d = addDays(start, i); return `D${i + 1} ${weekday(d)} ${d} · ${titleOf(t)}: ${slotsByDay[i].join(', ')}`; }),
       '',
       'OPTIONS (slot: id = name [equipment, level])',
       ...Object.entries(cands).map(([slot, list]) => `${slot}: ${list.map((e) => `${e.id} = ${e.name} [${e.equipment ?? '-'}, ${e.level ?? '-'}]`).join('; ')}`),
@@ -308,12 +415,13 @@ coach.post('/workout', async (c) => {
     if (!Array.isArray(raw) || !raw.length) throw new Error('no days');
     return {
       note: str((j as { note?: unknown }).note, 400),
-      days: raw.map((d: Record<string, unknown>) => ({ tip: str(d?.tip, 220), picks: d?.picks && typeof d.picks === 'object' ? d.picks as Record<string, unknown> : undefined })),
+      days: raw.map((d: Record<string, unknown>) => ({ tip: str(d?.tip, 220), picks: d?.picks && typeof d.picks === 'object' ? d.picks as Record<string, unknown> : undefined })) as DayPick[],
     };
   };
-  // A workout plan is fully usable without the model (rules pick the top options), so an AI outage only loses personalisation.
-  const ai = await askJson(c.env, messages, validate, span === 'week' ? 3000 : 1200)
-    .catch(() => ({ model: 'rules', result: { note: null as string | null, days: [] as { tip: string | null; picks?: Record<string, unknown> }[] } }));
+  // A workout plan is fully usable without any model (rules pick the top options), so an AI outage only loses personalisation.
+  const ai = await viaClef()
+    .catch(() => askJson(c.env, messages, validate, span === 'week' ? 3000 : 1200))
+    .catch(() => ({ model: 'rules', result: { note: null as string | null, days: [] as DayPick[] } }));
 
   const items: Record<string, unknown>[] = [];
   const metaDays: Record<string, DayMeta> = {};
@@ -323,15 +431,21 @@ coach.post('/workout', async (c) => {
     const day = addDays(start, i);
     const variant = seen[t] = (seen[t] ?? -1) + 1;
     const pick = ai.result.days[i];
-    metaDays[day] = { title: DAY_TITLE[t], type: t, tip: pick?.tip ?? DAY_TIP[t], rest: t === 'rest' };
+    metaDays[day] = { title: titleOf(t), type: t, tip: pick?.tip ?? DAY_TIP[t], rest: t === 'rest' };
     const picks = resolvePicks(slotsByDay[i], cands, pick?.picks, variant, lastOfType[t]);
     lastOfType[t] = Object.fromEntries(picks.map((x) => [x.slot, x.ex.id]));
     picks.forEach(({ slot, ex }, pos) => {
       items.push({ day, slot, pos, exercise_id: ex.id, name: ex.name, ...prescribe(slot, goal, p.activity, t, ex.tracking === 'time') });
     });
   });
-  const note = ai.result.note ?? `A ${types.filter((t) => t !== 'rest').length}-session plan for your goal to ${GOAL_TEXT[goal]}: big compound lifts first while you are fresh, then isolation work, core and cardio.`;
-  await savePlan(c.env, id, 'workout', span, start, types.length, { note, request: { span, start: b.start === 'tomorrow' ? 'tomorrow' : 'today', focus, train_days: trainDays, notes }, days: metaDays }, ai.model, items);
+  const sessions = types.filter((t) => t !== 'rest').length;
+  const note = ai.result.note ?? [
+    `A ${sessions}-session plan for your goal to ${GOAL_TEXT[goal]}.`,
+    custom ? `${span === 'day' ? 'Today' : 'Your first session'} trains what you asked for — ${req.muscles.map((m) => MUSCLES[m].label).join(', ')} — big lifts first while you are fresh, then isolation work.` : 'Big compound lifts first while you are fresh, then isolation work, core and cardio.',
+    req.avoid.length ? `Moves that load your ${req.avoid.map((j) => JOINT_LABEL[j]).join(' and ')} are left out — stop any exercise that causes pain.` : '',
+  ].filter(Boolean).join(' ');
+  await savePlan(c.env, id, 'workout', span, start, types.length,
+    { note, request: { span, start: b.start === 'tomorrow' ? 'tomorrow' : 'today', focus, train_days: trainDays, notes, muscles: req.muscles, avoid: req.avoid }, days: metaDays }, ai.model, items);
   await countUse(c.env, id, today);
   return c.json(await planView(c.env, id, 'workout'));
 });
@@ -412,7 +526,8 @@ coach.post('/items/:id/swap', async (c) => {
   assert(it.kind === 'workout' && SLOTS[it.slot], 400, 'Only exercises can be swapped');
   assert(!it.done, 400, 'Untick it first — it is already logged');
   const { p } = await loadProfile(c.env, id);
-  const list = slotCandidates(await exerciseCatalog(c.env) as unknown as ExCandidate[], [it.slot], 8, p?.activity === 'sedentary' || p?.activity === 'light')[it.slot];
+  const avoid = ((it.plan_meta ? JSON.parse(it.plan_meta) : {}) as PlanMeta).request?.avoid as Joint[] | undefined ?? [];
+  const list = slotCandidates(await exerciseCatalog(c.env) as unknown as ExCandidate[], [it.slot], 8, p?.activity === 'sedentary' || p?.activity === 'light', avoidPattern(avoid))[it.slot];
   const taken = new Set((await all<{ exercise_id: string }>(c.env.DB, `SELECT exercise_id FROM coach_plan_items WHERE plan_id=? AND day=? AND id<>?`, it.plan_id, it.day, it.id)).map((r) => r.exercise_id));
   const at = list.findIndex((e) => e.id === it.exercise_id);
   const next = [...list.slice(at + 1), ...list.slice(0, Math.max(0, at))].find((e) => !taken.has(e.id));

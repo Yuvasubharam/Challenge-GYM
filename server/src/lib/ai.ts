@@ -1,12 +1,54 @@
-// Workers AI client for the member coach: tries each model in order until one returns usable JSON.
-// All three speak the OpenAI chat format on Workers AI (choices[0].message.content).
+// Workers AI client for the member coach.
+//   1. Clef-flash (priority one): a decision model — given a state and typed questions it returns a
+//      choice (with probabilities) per question. The coach's planner fixes the structure, so the
+//      AI's job is exactly that: pick an exercise for each slot / a dish for each meal role, and read
+//      the member's request (which muscles, which injuries).
+//   2. Chat models (fallback, in order) for the same picks as one JSON answer when Clef fails.
+//      All three speak the OpenAI chat format on Workers AI (choices[0].message.content).
 import type { Env } from '../env';
 
+export const CLEF_MODEL = '@cf/cloudflare/clef-flash';
+
+/** Chat fallback chain, tried in order by askJson. */
 export const AI_MODELS = [
-  '@cf/qwen/qwen3-30b-a3b-fp8',          // primary: best planner, JSON mode, 32k context
-  '@cf/ibm-granite/granite-4.0-h-micro', // second: fast + cheap, 131k context
-  '@cf/zai-org/glm-5.3-flash',           // third: needs the Workers Paid plan (fails fast on Free)
+  '@cf/qwen/qwen3-30b-a3b-fp8',          // best JSON planner, 32k context
+  '@cf/ibm-granite/granite-4.0-h-micro', // fast + cheap, 131k context
+  '@cf/zai-org/glm-5.3-flash',           // needs the Workers Paid plan (fails fast on Free)
 ] as const;
+
+/** Every model in priority order (for display / docs). */
+export const MODEL_PRIORITY = [CLEF_MODEL, ...AI_MODELS] as const;
+
+// ── Clef-flash ──────────────────────────────────────────────────────────
+export type ClefQuestion =
+  | { type: 'noul'; instructions: string }
+  | { type: 'choice'; instructions: string; criteria: Record<string, string> };
+export interface ClefAnswer { type: string; noul?: number; choice?: string; probabilities?: Record<string, number>; confidence?: number }
+
+/** Clef accepts 1–64 questions per call; a 65k-token context fits 64 questions of ~12 options. */
+const CLEF_MAX_QUESTIONS = 64;
+
+/**
+ * Ask Clef-flash a set of typed questions about one `state` (text). Larger sets are split into
+ * calls of ≤ 64 questions that run in parallel. Throws when any call fails (callers fall back).
+ */
+export async function askClef(env: Env, state: string, questions: Record<string, ClefQuestion>): Promise<Record<string, ClefAnswer>> {
+  if (!env.AI) throw new Error('AI binding missing');
+  const ids = Object.keys(questions);
+  if (!ids.length) return {};
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += CLEF_MAX_QUESTIONS) chunks.push(ids.slice(i, i + CLEF_MAX_QUESTIONS));
+  const parts = await Promise.all(chunks.map(async (chunk) => {
+    const r = await env.AI!.run(CLEF_MODEL, { model: 'clef-flash', state, questions: Object.fromEntries(chunk.map((id) => [id, questions[id]])) }) as { answers?: Record<string, ClefAnswer> };
+    if (!r?.answers) throw new Error('clef: no answers');
+    return r.answers;
+  }));
+  return Object.assign({}, ...parts);
+}
+
+/** The chosen option of a choice answer, only when it is one of the offered keys. */
+export const clefChoice = (a: ClefAnswer | undefined, allowed: Record<string, string>): string | undefined =>
+  a?.choice && a.choice in allowed ? a.choice : undefined;
 
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
 

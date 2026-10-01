@@ -34,7 +34,7 @@ check('profile: lose weight, veg + egg', r.status === 200, r.data);
 
 console.log('\n── diet plan');
 r = await call('GET', '/coach/diet');
-check('no plan yet', r.data.plan === null && r.data.builds_left === 10, r.data);
+check('no plan yet, 5 AI requests a day', r.data.plan === null && r.data.builds_left === 5, r.data);
 r = await call('POST', '/coach/diet', { span: 'day', notes: 'South Indian breakfast please' });
 check(`day plan built by ${r.data.plan?.model} in ${r.ms} ms`, r.status === 200 && r.data.days?.length === 1, r.data);
 const d1 = r.data.days[0];
@@ -110,7 +110,29 @@ r = await call('POST', '/coach/workout', { span: '3days' });
 check(`3-day plan: ${r.data.days?.map((d: any) => d.type).join(', ')}`, r.status === 200 && r.data.days.length === 3 && r.data.days.every((d: any) => d.type === 'full'));
 
 r = await call('GET', '/coach/workout');
-check('builds counted', r.data.builds_left === 10 - 5, r.data.builds_left);
+check('5 requests used → none left', r.data.builds_left === 0, r.data.builds_left);
+r = await call('POST', '/coach/workout', { span: 'day' });
+check('6th request today is refused (429)', r.status === 429 && /5 AI coach requests/.test(r.data.error), r.data);
+sql(`DELETE FROM coach_usage WHERE member_id=${m.id}`); // new day for the rest of the test
+
+console.log('\n── workout follows the request');
+r = await call('POST', '/coach/workout', { span: 'day', notes: 'Provide lats, upper back, and lower back workout' });
+const back = r.data.days?.[0];
+console.log(`    ${back?.title}: ${back?.items.map((i: any) => `${i.slot}: ${i.name}`).join(' | ')}  (${r.data.plan?.model}, ${r.ms} ms)`);
+check('request → its own day, titled for the back', r.status === 200 && back.type === 'custom' && /^Back/.test(back.title), back && { type: back.type, title: back.title });
+const backSlots = new Set(['warmup', 'vertical_pull', 'lat_2', 'row', 'upper_back', 'lower_back', 'hinge', 'cardio', 'stretch']);
+check('every exercise trains what was asked (no chest/legs/shoulder press)', back?.items.every((i: any) => backSlots.has(i.slot)), back?.items.map((i: any) => i.slot));
+check('lats, upper back and lower back all covered', ['vertical_pull', 'row', 'lower_back'].every((s) => back?.items.some((i: any) => i.slot === s)));
+check('built by Clef-flash', r.data.plan?.model === '@cf/cloudflare/clef-flash', r.data.plan?.model);
+r = await call('POST', '/coach/workout', { span: 'day', notes: 'leg day but I have knee pain' });
+const legs = r.data.days?.[0];
+console.log(`    ${legs?.title}: ${legs?.items.map((i: any) => i.name).join(' | ')}`);
+check('knee pain → no squats, lunges, leg extensions, jumps or running', legs && !legs.items.some((i: any) => /squat|lunge|step-?up|leg extension|leg press|jump|run/i.test(i.name)), legs?.items.map((i: any) => i.name));
+check('…but still a leg session (hamstrings / glutes / calves)', legs?.items.some((i: any) => ['ham_curl', 'glute', 'calves', 'hinge'].includes(i.slot)), legs?.items.map((i: any) => i.slot));
+r = await call('POST', '/coach/workout', { span: 'week', train_days: 4, notes: 'chest and arms' });
+check('week with a request: first session is the requested one, the rest stay balanced', r.status === 200 && r.data.days[0].type === 'custom' && r.data.days.filter((d: any) => d.type === 'lower').length === 2,
+  r.data.days?.map((d: any) => d.type));
+sql(`DELETE FROM coach_usage WHERE member_id=${m.id}`);
 
 console.log('\n── vegan preference');
 await call('PUT', '/fit/profile', { age: 30, gender: 'female', height_cm: 160, weight_kg: 50, goal: 'build_muscle', activity: 'moderate', workouts_per_week: 5, diet_pref: ['vegan'] });

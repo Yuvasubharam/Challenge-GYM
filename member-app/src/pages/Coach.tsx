@@ -25,7 +25,7 @@ interface PlanRes {
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const dow = (d: string) => DOW[new Date(d + 'T00:00:00Z').getUTCDay()];
 const modelName = (m: string | null) => !m ? '' : m === 'rules' ? 'coach rules' : m.split(', ').map((x) =>
-  x.includes('qwen') ? 'Qwen3' : x.includes('granite') ? 'Granite 4' : x.includes('glm') ? 'GLM-5.3' : x.split('/').pop()).join(' + ');
+  x.includes('clef') ? 'Clef-flash' : x.includes('qwen') ? 'Qwen3' : x.includes('granite') ? 'Granite 4' : x.includes('glm') ? 'GLM-5.3' : x.split('/').pop()).join(' + ');
 
 export default function Coach() {
   const [params, setParams] = useSearchParams();
@@ -124,14 +124,14 @@ function Builder({ kind, res, onCancel, onBuilding, onBuilt }: { kind: Kind; res
       <Choice label="Starting" value={start} onChange={setStart} options={[['today', 'Today'], ['tomorrow', 'Tomorrow']]} />
       <Field label="Anything the coach should know? (optional)">
         <textarea className="input min-h-[76px] py-3" maxLength={200} value={notes} onChange={(e) => setNotes(e.target.value)}
-          placeholder={kind === 'diet' ? 'e.g. South Indian breakfast, no mushrooms, budget-friendly' : 'e.g. knee pain, only dumbbells, keep it under 45 minutes'} />
+          placeholder={kind === 'diet' ? 'e.g. South Indian breakfast, no mushrooms, budget-friendly' : 'e.g. lats, upper back and lower back · knee pain · only dumbbells'} />
       </Field>
       <div className="flex gap-2">
         {onCancel && <button className="btn btn-outline" onClick={onCancel}>Cancel</button>}
         <button className="btn btn-primary btn-lg flex-1" onClick={build}><Sparkles className="w-4 h-4" />{res.plan ? 'Build a new plan' : 'Build my plan'}</button>
       </div>
       {res.plan && <p className="text-[11px] muted">This replaces your current {kind} plan. Items you already ticked stay in your diary.</p>}
-      {res.builds_left !== undefined && res.builds_left <= 3 && <p className="text-[11px] muted">{res.builds_left} AI builds left today.</p>}
+      {res.builds_left !== undefined && <p className="text-[11px] muted">{res.builds_left === 0 ? 'No AI coach requests left today — try again tomorrow.' : `${res.builds_left} of 5 AI coach requests left today.`}</p>}
     </section>
   );
 }

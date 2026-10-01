@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { AI_MODELS, askJson, extractJson } from '../src/lib/ai';
 import type { Env } from '../src/env';
 import {
-  SLOTS, balanceDay, daySlots, dayTotals, dietAllows, mealIssues, mergeDuplicates, partitionDishes, planDays, prescribe, resolvePicks, roundGrams, scaleDay, slotCandidates,
+  SLOTS, avoidPattern, balanceDay, daySlots, dayTotals, dietAllows, guardSlots, mealIssues, mealRoles, mergeDuplicates, partitionDishes, planDays, prescribe, readRequest, requestedDay, requestedTitle,
+  resolvePicks, roundGrams, scaleDay, slotCandidates,
   type ExCandidate, type FoodCandidate,
 } from '../src/lib/planner';
 
@@ -124,5 +125,80 @@ describe('AI client', () => {
     const env = { AI: { run: async () => ({ choices: [{ message: { content: n++ ? '{"days":[1]}' : '{"days":[]}' } }] }) } } as unknown as Env;
     const r = await askJson(env, [{ role: 'user', content: 'x' }], (j) => { if (!(j as { days: unknown[] }).days.length) throw new Error('empty'); return j; });
     expect(r.model).toBe(AI_MODELS[1]);
+  });
+});
+
+describe('member request → workout structure', () => {
+  it('reads muscles, keeping painful joints out of the training list', () => {
+    expect(readRequest('Provide lats, upper back, and lower back workout').muscles.sort()).toEqual(['lats', 'lower_back', 'upper_back']);
+    expect(readRequest('back and biceps day').muscles.sort()).toEqual(['biceps', 'lats', 'lower_back', 'upper_back']);
+    expect(readRequest('chest and triceps, I have knee pain')).toEqual({ muscles: ['chest', 'triceps'], avoid: ['knees'] });
+    const r = readRequest('lower back pain, train arms');
+    expect(r.avoid).toEqual(['lower_back']);
+    expect(r.muscles.sort()).toEqual(['biceps', 'triceps']);
+    expect(readRequest('my chest is weak, focus on it').muscles).toEqual(['chest']);
+    expect(readRequest('no cardio please').muscles).toEqual([]);
+    expect(readRequest('')).toEqual({ muscles: [], avoid: [] });
+  });
+
+  it('builds a day that trains exactly the requested muscles, compounds first', () => {
+    const day = requestedDay(['lats', 'upper_back', 'lower_back'], 'build_muscle');
+    expect(day[0]).toBe('warmup');
+    expect(day.at(-1)).toBe('stretch');
+    expect(day).toEqual(expect.arrayContaining(['vertical_pull', 'lat_2', 'row', 'upper_back', 'lower_back']));
+    expect(day).not.toContain('chest_press');
+    expect(day).not.toContain('squat');
+    expect(day).not.toContain('cardio'); // build_muscle prescribes no cardio and none was asked for
+    const rank = { warmup: 0, compound: 1, iso: 2, core: 3, cardio: 4, stretch: 5, walk: 5 } as const;
+    const roles = day.map((s) => rank[SLOTS[s].role]);
+    expect(roles).toEqual([...roles].sort((a, b) => a - b));
+    expect(requestedTitle(['lats', 'upper_back', 'lower_back'])).toBe('Back — lats, upper back, lower back');
+  });
+
+  it('adds core/cardio only when asked (cardio also when the goal needs it) and caps the session', () => {
+    expect(requestedDay(['chest', 'abs'], 'build_muscle')).toEqual(['warmup', 'chest_press', 'chest_2', 'core', 'core_2', 'stretch']);
+    expect(requestedDay(['biceps'], 'lose_weight')).toContain('cardio');
+    const big = requestedDay(['chest', 'lats', 'upper_back', 'shoulders', 'biceps', 'triceps', 'quads'], 'maintain');
+    expect(big.filter((s) => ['compound', 'iso'].includes(SLOTS[s].role)).length).toBeLessThanOrEqual(8);
+  });
+
+  it('protects painful joints in custom days, template days and exercise choices', () => {
+    expect(requestedDay(['quads', 'hamstrings'], 'build_muscle', ['knees'])).not.toEqual(expect.arrayContaining(['squat']));
+    expect(guardSlots(daySlots('legs', 'build_muscle'), ['knees'])).not.toContain('lunge');
+    expect(guardSlots(daySlots('push', 'build_muscle'), ['shoulders'])).not.toContain('shoulder_press');
+    const re = avoidPattern(['knees'])!;
+    expect(re.test('Barbell Full Squat')).toBe(true);
+    expect(re.test('Lying Leg Curl')).toBe(false);
+    expect(avoidPattern([])).toBeNull();
+    const ex = (id: string, name: string): ExCandidate => ({ id, name, body_part: 'upper legs', target: 'quads', equipment: 'barbell', category: 'strength', level: 'beginner', images: null, tracking: 'sets', popular: 1 });
+    expect(slotCandidates([ex('a', 'Barbell Squat'), ex('b', 'Leg Press')], ['squat'], 8, false, re).squat).toEqual([]);
+  });
+
+  it('takes Clef picks by position', () => {
+    const e = (id: string, name: string, target: string): ExCandidate => ({ id, name, body_part: 'back', target, equipment: 'cable', category: 'strength', level: 'beginner', images: null, tracking: 'sets', popular: 1 });
+    const cands = { vertical_pull: [e('pd', 'Cable Pulldown', 'lats'), e('pu', 'Pull-up', 'lats')], row: [e('r1', 'Cable Seated Row', 'upper back'), e('r2', 'Barbell Bent Over Row', 'upper back')] };
+    expect(resolvePicks(['vertical_pull', 'row'], cands, ['pu', 'r2']).map((p) => p.ex.id)).toEqual(['pu', 'r2']);
+    expect(resolvePicks(['vertical_pull', 'row'], cands, [undefined, 'nope']).map((p) => p.ex.id)).toEqual(['pd', 'r1']);
+  });
+});
+
+describe('meal roles for the decision model', () => {
+  it('offers only suitable dishes per role', () => {
+    const pool = [
+      food(1, 'Idli', 130, 4.5, 40, '1 idli (40 g)', 'cg'), food(2, 'Masala dosa', 190, 4, 180, '1 dosa', 'cg'), food(3, 'Sambar', 70, 3, 200, '1 bowl', 'cg'),
+      food(4, 'Curd / plain yogurt', 61, 3.5, 150, '1 bowl', 'basic'), food(5, 'Rice, white, cooked', 130, 2.7, 150, '1 bowl', 'basic'), food(6, 'Chapati / roti (with ghee)', 240, 7.5, 40, '1 roti (40 g)', 'cg'),
+      food(7, 'Dal tadka', 115, 5.5, 200, '1 bowl', 'cg'), food(8, 'Chana masala (chole)', 150, 6.5, 200, '1 bowl', 'cg'), food(9, 'Paneer bhurji', 230, 13, 150, '1 bowl', 'cg'),
+      food(10, 'Beans poriyal (beans fry)', 85, 2.5, 150, '1 bowl', 'cg'), food(11, 'Banana', 89, 1.1, 118, '1 medium', 'basic'), food(12, 'Moong sprouts', 30, 3, 100, '1 bowl', 'basic'),
+      food(13, 'Chicken curry', 160, 14, 200, '1 bowl', 'cg', 'nonveg'),
+    ];
+    const roles = Object.fromEntries(mealRoles(pool).map((r) => [`${r.meal}.${r.role}`, r.options.map((f) => f.id)]));
+    expect(roles['breakfast.main']).toEqual(expect.arrayContaining([1, 2]));
+    expect(roles['breakfast.main']).not.toContain(5);
+    expect(roles['lunch.grain']).toEqual(expect.arrayContaining([5, 6]));
+    expect(roles['lunch.grain']).not.toContain(1); // idli is not a lunch grain
+    expect(roles['lunch.dish']).toEqual(expect.arrayContaining([7, 8, 13]));
+    expect(roles['lunch.dish']).not.toContain(5);
+    expect(roles['lunch.protein']).toEqual(expect.arrayContaining([9, 13]));
+    expect(roles['snacks.snack1']).toEqual(expect.arrayContaining([11, 12]));
   });
 });
