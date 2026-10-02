@@ -63,8 +63,21 @@ export interface Settings {
   reminders: { near_days: number; soon_days: number };
   receipt: { prefix: string; next: number };
   renewal_push: RenewalPush;
+  ai_models: AiModels;
   renewal_push_log: { day: string | null; at: string | null; members: number; sent: number; failed: number };
+  weight_push: WeightPush;
+  weight_push_log: { day: string | null; at: string | null; members: number; sent: number; failed: number };
 }
+
+/** Weekly weigh-in reminder; weekday 0 = Sunday. Lines rotate weekly by the member's status. */
+export interface WeightPush {
+  enabled: boolean; weekday: number; send_hour: number; due_title: string; due_message: string;
+  on_track: string[]; off_track: string[]; reached: string[];
+}
+
+/** AI coach model order (first = tried first); 'same' = the diet list is used for workouts too. */
+export interface AiModels { same: boolean; diet: string[]; workout: string[] }
+export interface AiModelInfo { id: string; name: string; kind: 'decision' | 'chat'; note: string }
 
 export interface RenewalPush {
   enabled: boolean; days_before: number; send_hour: number; title: string; message: string; motivation: string[];

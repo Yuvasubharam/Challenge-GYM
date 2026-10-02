@@ -1,14 +1,14 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, FileSpreadsheet, Upload, UserPlus } from 'lucide-react';
+import { ArrowDown, ArrowUp, CheckCircle2, FileSpreadsheet, Sparkles, Upload, UserPlus } from 'lucide-react';
 import { api } from '../lib/api';
 import { ago } from '../lib/format';
-import type { Settings as S } from '../lib/types';
+import type { AiModelInfo, AiModels, Settings as S } from '../lib/types';
 import { chunk, parseWorkbook, type Parsed } from '../lib/excelImport';
 import { ErrorBox, Field, Modal, PageLoader, Segmented, SectionTitle, Spinner, useAction, useLoad, useToast } from '../components/ui';
 import { PageHeader } from '../components/Layout';
 import { useSession } from '../lib/session';
 
-type Tab = 'gym' | 'access' | 'push' | 'import' | 'staff' | 'account' | 'audit'; // announcements moved to /content
+type Tab = 'gym' | 'access' | 'push' | 'weight' | 'ai' | 'import' | 'staff' | 'account' | 'audit'; // announcements moved to /content
 
 export default function SettingsPage() {
   const { can } = useSession();
@@ -19,7 +19,7 @@ export default function SettingsPage() {
   const admin = can('owner', 'admin');
   const options: { value: Tab; label: string }[] = [
     { value: 'gym', label: 'Gym & UPI' },
-    ...(admin ? [{ value: 'access' as Tab, label: 'Access rules' }, { value: 'push' as Tab, label: 'Renewal reminders' },
+    ...(admin ? [{ value: 'access' as Tab, label: 'Access rules' }, { value: 'push' as Tab, label: 'Renewal reminders' }, { value: 'weight' as Tab, label: 'Weigh-in reminders' }, { value: 'ai' as Tab, label: 'AI coach' },
       { value: 'import' as Tab, label: 'Import Excel' }, { value: 'staff' as Tab, label: 'Staff logins' }] : []),
     { value: 'account', label: 'My password' },
     ...(admin ? [{ value: 'audit' as Tab, label: 'Audit log' }] : []),
@@ -31,6 +31,8 @@ export default function SettingsPage() {
       {tab === 'gym' && <GymTab s={data} onSaved={reload} readOnly={!admin} />}
       {tab === 'access' && <AccessTab s={data} onSaved={reload} />}
       {tab === 'push' && <RenewalPushTab s={data} onSaved={reload} />}
+      {tab === 'weight' && <WeightPushTab s={data} onSaved={reload} />}
+      {tab === 'ai' && <AiModelsTab s={data} onSaved={reload} />}
       {tab === 'import' && <ImportTab />}
       {tab === 'staff' && <StaffTab />}
       {tab === 'account' && <AccountTab />}
@@ -183,9 +185,160 @@ function RenewalPushTab({ s, onSaved }: { s: S; onSaved: () => void }) {
   );
 }
 
+interface WeightPushStatus {
+  push_ready: boolean;
+  log: S['weight_push_log'];
+  due_now: { member_id: number; name: string }[];
+  due_count: number;
+  preview: Record<'on_track' | 'off_track' | 'reached', { title: string; body: string }>;
+}
+
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+function WeightPushTab({ s, onSaved }: { s: S; onSaved: () => void }) {
+  const { busy, run } = useAction();
+  const toast = useToast();
+  const w = s.weight_push;
+  const [f, setF] = useState({ ...w, on: w.on_track.join('\n'), off: w.off_track.join('\n'), hit: w.reached.join('\n') });
+  const [pv, setPv] = useState<'on_track' | 'off_track' | 'reached'>('on_track');
+  const { data: st, reload } = useLoad(() => api.get<WeightPushStatus>('/weight-push'));
+  const lines = (t: string) => t.split('\n').map((x) => x.trim()).filter(Boolean);
+  const save = () => run(() => api.put('/settings/weight_push', {
+    enabled: f.enabled, weekday: f.weekday, send_hour: f.send_hour, due_title: f.due_title, due_message: f.due_message,
+    on_track: lines(f.on), off_track: lines(f.off), reached: lines(f.hit),
+  }), 'Saved').then(() => { onSaved(); void reload(); });
+  const log = st?.log ?? s.weight_push_log;
+  const preview = st?.preview[pv];
+  return (
+    <div className="grid gap-4 lg:grid-cols-5">
+      <div className="card card-pad space-y-4 lg:col-span-3 min-w-0">
+        <SectionTitle title="Weekly weigh-in reminder" />
+        <p className="text-sm muted -mt-2">Once a week, members who use the fitness tracker get a phone notification to log their weight, with a line about their own progress. Members who already weighed in during the last 3 days are skipped.</p>
+        <label className="flex items-center gap-3 rounded-2xl bg-black/[.03] dark:bg-white/[.04] p-4 cursor-pointer">
+          <input type="checkbox" className="w-5 h-5 accent-lime-600" checked={f.enabled} onChange={(e) => setF({ ...f, enabled: e.target.checked })} />
+          <span className="text-sm"><b>Send weekly weigh-in reminders</b><span className="block muted">{f.enabled ? `On — every ${WEEKDAYS[f.weekday]} at ${hourLabel(f.send_hour)}` : 'Off'}</span></span>
+        </label>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Day">
+            <select className="input" value={f.weekday} onChange={(e) => setF({ ...f, weekday: Number(e.target.value) })}>
+              {WEEKDAYS.map((d, i) => <option key={d} value={i}>{d}</option>)}
+            </select></Field>
+          <Field label="Send at" hint="Morning is best — members weigh in before breakfast.">
+            <select className="input" value={f.send_hour} onChange={(e) => setF({ ...f, send_hour: Number(e.target.value) })}>
+              {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{hourLabel(h)}</option>)}
+            </select></Field>
+        </div>
+        <Field label="Title" hint="Placeholders: {name} {gym} {current} {change} {to_go} {target} {days}">
+          <input className="input" maxLength={120} value={f.due_title} onChange={(e) => setF({ ...f, due_title: e.target.value })} /></Field>
+        <Field label="Message">
+          <textarea className="input" rows={2} maxLength={300} value={f.due_message} onChange={(e) => setF({ ...f, due_message: e.target.value })} /></Field>
+        <Field label="Progress lines — on track (one per line)" hint="Added for members moving towards their goal at ≥0.25 kg a week. One line per week, rotating.">
+          <textarea className="input" rows={3} value={f.on} onChange={(e) => setF({ ...f, on: e.target.value })} /></Field>
+        <Field label="Progress lines — slow or off track" hint="Encouraging lines for members stalling or moving away from their goal.">
+          <textarea className="input" rows={3} value={f.off} onChange={(e) => setF({ ...f, off: e.target.value })} /></Field>
+        <Field label="Progress lines — goal reached">
+          <textarea className="input" rows={2} value={f.hit} onChange={(e) => setF({ ...f, hit: e.target.value })} /></Field>
+        <button className="btn btn-primary" disabled={busy} onClick={save}>Save</button>
+      </div>
+
+      <div className="space-y-4 lg:col-span-2 min-w-0">
+        {st && !st.push_ready && <div className="card card-pad text-sm border-warn/40 dark:border-warn/40">Phone notifications are not set up on the server (VAPID keys missing), so nothing can be sent yet.</div>}
+        <div className="card card-pad space-y-3">
+          <SectionTitle title="Preview (saved settings)" />
+          <Segmented value={pv} onChange={setPv} options={[{ value: 'on_track', label: 'On track' }, { value: 'off_track', label: 'Off track' }, { value: 'reached', label: 'Reached' }]} />
+          <div className="rounded-2xl bg-ink-900 text-white p-4 flex gap-3">
+            <img src="/favicon-128.png" alt="" className="w-9 h-9 rounded-xl bg-ink-800 p-1 shrink-0" />
+            <div className="min-w-0 text-sm">
+              <p className="font-semibold">{preview?.title ?? '…'}</p>
+              <p className="text-ink-300 whitespace-pre-line mt-0.5">{preview?.body}</p>
+            </div>
+          </div>
+          <p className="text-xs muted">Sample member: started 84 kg, goal 74 kg.</p>
+        </div>
+        <div className="card card-pad space-y-3">
+          <SectionTitle title="Due now" action={<span className="text-xs muted">{st ? `${st.due_count} members` : ''}</span>} />
+          <p className="text-sm">{log.day ? <>Last sent <b>{ago(log.at)}</b> to {log.members} member{log.members === 1 ? '' : 's'} ({log.sent} phone{log.sent === 1 ? '' : 's'}{log.failed ? `, ${log.failed} failed` : ''}).</> : 'Not sent yet.'}</p>
+          {st && st.due_count > 0 ? (
+            <ul className="text-sm divide-y divide-paper-line dark:divide-ink-700 max-h-56 overflow-y-auto">
+              {st.due_now.map((m) => <li key={m.member_id} className="py-1.5 truncate">{m.name}</li>)}
+            </ul>
+          ) : st && <p className="text-sm muted">Nobody to remind right now — members need the app with notifications on, a fitness profile, and no weigh-in in the last 3 days.</p>}
+          <button className="btn btn-outline w-full" disabled={busy || !st?.push_ready || !st?.due_count}
+            onClick={() => run(() => api.post<{ run: { members: number; sent: number; failed: number } }>('/weight-push/send')).then((r) => {
+              if (r) toast('ok', `Sent to ${r.run.members} member${r.run.members === 1 ? '' : 's'} (${r.run.sent} phone${r.run.sent === 1 ? '' : 's'}${r.run.failed ? `, ${r.run.failed} failed` : ''})`);
+              onSaved(); void reload();
+            })}>Send weigh-in reminders now</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface ImportReport {
   members_new: number; members_updated: number; terms_new: number; payments_new: number; followups_new: number; dues_adjusted: number;
   shared_ids: { essl_id: string; kept: string; separated: string[] }[]; no_end_date: { essl_id: string; name: string }[]; not_on_device: string[];
+}
+
+/** Which Workers AI models the member coach uses, in order (first that answers wins), for diet and workouts. */
+function AiModelsTab({ s, onSaved }: { s: S; onSaved: () => void }) {
+  const { busy, run } = useAction();
+  const { data } = useLoad(() => api.get<{ models: AiModelInfo[] }>('/ai-models'));
+  const [f, setF] = useState<AiModels>(s.ai_models);
+  useEffect(() => setF(s.ai_models), [s.ai_models]);
+  if (!data) return <PageLoader />;
+  const all = data.models;
+  const save = () => run(() => api.put('/settings/ai_models', f), 'Saved — the next plan build uses these models').then(onSaved);
+  const lists: { key: 'diet' | 'workout'; title: string; hint: string }[] = f.same
+    ? [{ key: 'diet', title: 'Diet & workout plans', hint: 'One order for both coaches.' }]
+    : [{ key: 'diet', title: 'Diet plans', hint: 'Picks dishes for each meal.' }, { key: 'workout', title: 'Workout plans', hint: 'Picks exercises and reads requests like “leg pain, back and biceps”.' }];
+  return (
+    <div className="space-y-4 max-w-3xl">
+      <div className="card card-pad space-y-3">
+        <SectionTitle title="AI coach models" />
+        <p className="text-sm muted">The member app’s AI coach tries these models from the top; if one fails or is busy, the next one is used. Untick a model to stop using it. The coach’s own rules still fix the plan structure, calories and food/exercise safety whichever model answers.</p>
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" className="accent-lime w-4 h-4" checked={f.same}
+          onChange={(e) => setF({ ...f, same: e.target.checked, workout: e.target.checked ? f.diet : f.workout })} />Use the same models for diet and workouts</label>
+      </div>
+      {lists.map(({ key, title, hint }) => (
+        <ModelOrder key={key} title={title} hint={hint} all={all} value={f[key]} onChange={(v) => setF({ ...f, [key]: v, ...(f.same ? { workout: v } : {}) })} />
+      ))}
+      <button className="btn btn-primary" disabled={busy || !f.diet.length || (!f.same && !f.workout.length)} onClick={save}>{busy && <Spinner className="w-4 h-4" />}Save</button>
+    </div>
+  );
+}
+
+function ModelOrder({ title, hint, all, value, onChange }: { title: string; hint: string; all: AiModelInfo[]; value: string[]; onChange: (v: string[]) => void }) {
+  // Enabled models in their order, then the disabled ones.
+  const rows = [...value.map((id) => all.find((m) => m.id === id)).filter((m): m is AiModelInfo => !!m), ...all.filter((m) => !value.includes(m.id))];
+  const move = (id: string, d: -1 | 1) => {
+    const i = value.indexOf(id), j = i + d;
+    if (i < 0 || j < 0 || j >= value.length) return;
+    const next = [...value]; [next[i], next[j]] = [next[j], next[i]]; onChange(next);
+  };
+  const toggle = (id: string) => onChange(value.includes(id) ? value.filter((x) => x !== id) : [...value, id]);
+  return (
+    <div className="card overflow-hidden">
+      <div className="px-4 pt-4 pb-2"><p className="font-semibold flex items-center gap-2"><Sparkles className="w-4 h-4" />{title}</p><p className="text-xs muted">{hint}</p></div>
+      <ul>
+        {rows.map((m) => {
+          const pos = value.indexOf(m.id);
+          return (
+            <li key={m.id} className={`flex items-center gap-3 px-4 py-3 border-t border-paper-line dark:border-ink-700 ${pos < 0 ? 'opacity-50' : ''}`}>
+              <input type="checkbox" className="accent-lime w-4 h-4" checked={pos >= 0} onChange={() => toggle(m.id)} aria-label={`Use ${m.name}`} />
+              <span className="w-6 text-center font-display font-bold">{pos >= 0 ? pos + 1 : '–'}</span>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold">{m.name} <span className="badge bg-black/5 dark:bg-white/10 ml-1">{m.kind === 'decision' ? 'decision model' : 'chat model'}</span></p>
+                <p className="text-xs muted">{m.note}</p>
+              </div>
+              <button className="icon-btn w-8 h-8" disabled={pos <= 0} onClick={() => move(m.id, -1)} aria-label="Move up"><ArrowUp className="w-4 h-4" /></button>
+              <button className="icon-btn w-8 h-8" disabled={pos < 0 || pos >= value.length - 1} onClick={() => move(m.id, 1)} aria-label="Move down"><ArrowDown className="w-4 h-4" /></button>
+            </li>
+          );
+        })}
+      </ul>
+      {!value.length && <p className="text-xs text-bad px-4 pb-3">Tick at least one model.</p>}
+    </div>
+  );
 }
 
 function ImportTab() {

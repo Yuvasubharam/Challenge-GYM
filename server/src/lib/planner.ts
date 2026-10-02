@@ -82,7 +82,7 @@ export const TEMPLATES: Record<DayType, string[]> = {
 
 // ── The member's request → muscles to train, joints to protect ─────────
 export type Muscle = 'chest' | 'lats' | 'upper_back' | 'lower_back' | 'shoulders' | 'biceps' | 'triceps' | 'quads' | 'hamstrings' | 'glutes' | 'calves' | 'abs' | 'cardio';
-export type Joint = 'knees' | 'shoulders' | 'lower_back' | 'wrists';
+export type Joint = 'legs' | 'knees' | 'shoulders' | 'lower_back' | 'wrists';
 
 export const MUSCLES: Record<Muscle, { label: string; slots: string[] }> = {
   chest:      { label: 'chest', slots: ['chest_press', 'chest_2'] },
@@ -99,10 +99,13 @@ export const MUSCLES: Record<Muscle, { label: string; slots: string[] }> = {
   abs:        { label: 'abs & core', slots: ['core', 'core_2'] },
   cardio:     { label: 'cardio', slots: ['cardio'] },
 };
-export const JOINT_LABEL: Record<Joint, string> = { knees: 'knees', shoulders: 'shoulders', lower_back: 'lower back', wrists: 'wrists' };
+export const JOINT_LABEL: Record<Joint, string> = { legs: 'legs', knees: 'knees', shoulders: 'shoulders', lower_back: 'lower back', wrists: 'wrists' };
+/** Muscles that are off-limits when a joint/region hurts (they are removed even if requested). */
+export const JOINT_MUSCLES: Record<Joint, Muscle[]> = { legs: ['quads', 'hamstrings', 'glutes', 'calves'], knees: ['quads'], shoulders: ['shoulders'], lower_back: ['lower_back'], wrists: [] };
 
 /** Slots dropped and exercise names excluded when a joint hurts. */
 const JOINT_GUARD: Record<Joint, { slots: string[]; names: RegExp }> = {
+  legs:       { slots: ['squat', 'lunge', 'quad_iso', 'ham_curl', 'calves', 'glute', 'hinge'], names: /squat|lunge|step-?up|jump|leg (press|extension|curl)|calf|hip thrust|glute|deadlift|good morning|run|sprint|stair|skip|burpee|box|bike|cycl|elliptical|treadmill/i },
   knees:      { slots: ['squat', 'lunge', 'quad_iso'], names: /squat|lunge|step-?up|jump|leg extension|leg press|run|sprint|stair|skip|burpee|box/i },
   shoulders:  { slots: ['shoulder_press', 'triceps_2'], names: /overhead|military|arnold|behind|upright row|dip|snatch|handstand|pull-?up|chin-?up/i },
   lower_back: { slots: ['hinge', 'lower_back'], names: /deadlift|good morning|bent.?over|hyperextension|back extension|superman|t-?bar|clean|swing|sit-?up/i },
@@ -131,7 +134,8 @@ const MUSCLE_WORDS: [RegExp, Muscle[]][] = [
   [/upper body/i, ['chest', 'lats', 'upper_back', 'shoulders', 'biceps', 'triceps']],
 ];
 const JOINT_WORDS: [RegExp, Joint][] = [
-  [/knees?/i, 'knees'], [/shoulders?|rotator/i, 'shoulders'], [/lower[- ]back|\bback\b|spine|disc|sciatica|lumbar/i, 'lower_back'], [/wrists?/i, 'wrists'],
+  [/\blegs?|thigh|calf|calves|hamstring|ankle|foot|feet|hip\b/i, 'legs'], [/knees?/i, 'knees'], [/shoulders?|rotator/i, 'shoulders'],
+  [/lower[- ]?back|back ?(pain|injur|ache|hurt|sore|problem|issue|strain)|spine|disc|sciatica|lumbar/i, 'lower_back'], [/wrists?/i, 'wrists'],
 ];
 const PAIN = /pain|injur|hurt|sore|ache|strain|sprain|surgery|operat|problem|torn|tear|slip|avoid|can'?t|cannot|\bno\b|\bnot\b|without/i;
 
@@ -139,7 +143,9 @@ const PAIN = /pain|injur|hurt|sore|ache|strain|sprain|surgery|operat|problem|tor
 export function readRequest(text: string | null | undefined): { muscles: Muscle[]; avoid: Joint[] } {
   const muscles = new Set<Muscle>();
   const avoid = new Set<Joint>();
-  for (const clause of (text ?? '').split(/[.;,\n]|\bbut\b|\bexcept\b/i)) {
+  // Split into clauses so "back and biceps due to leg pain, I can't do legs" keeps the request and the pain apart.
+  const clauses = (text ?? '').split(/[.;,!?\n]|\bbut\b|\bexcept\b|\bdue to\b|\bbecause\b|\bsince\b|\bso\b|\bas i\b|\b(?=i (?:have|got|had|can'?t|cannot|am not|dont|don'?t)\b)|\b(?=(?:can'?t|cannot|not able to|unable to)\b)/i);
+  for (const clause of clauses) {
     if (!clause.trim()) continue;
     if (PAIN.test(clause)) {
       for (const [re, j] of JOINT_WORDS) if (re.test(clause)) avoid.add(j);
@@ -149,7 +155,13 @@ export function readRequest(text: string | null | undefined): { muscles: Muscle[
     // A plain "back" means the whole back.
     if (/\bback\b/i.test(clause) && !/upper[- ]back|lower[- ]back|back width|wider back/i.test(clause)) ['lats', 'upper_back', 'lower_back'].forEach((m) => muscles.add(m as Muscle));
   }
-  return { muscles: [...muscles], avoid: [...avoid] };
+  return withoutAvoided([...muscles], [...avoid]);
+}
+
+/** Painful regions win over requests: drop muscles that belong to an avoided region. */
+export function withoutAvoided(muscles: Muscle[], avoid: Joint[]): { muscles: Muscle[]; avoid: Joint[] } {
+  const off = new Set(avoid.flatMap((j) => JOINT_MUSCLES[j]));
+  return { muscles: muscles.filter((m) => !off.has(m)), avoid };
 }
 
 /**
@@ -340,8 +352,25 @@ export function dietAllows(veg: string | null, name: string, prefs: string[]): b
   if (!prefs.length || prefs.includes('nonveg')) return true;
   if (veg === 'nonveg' || MEAT_NAME.test(name)) return false;
   if (veg === 'egg' && !prefs.includes('egg')) return false;
+  if (!prefs.includes('egg') && /\beggs?\b|omelet|omelette|\banda\b|bhurji/i.test(name) && !/eggless|without egg|paneer bhurji/i.test(name)) return false; // mis-tagged egg dishes
   if (prefs.length === 1 && prefs[0] === 'vegan') return veg !== 'egg' && !DAIRY.test(name) && !/egg/i.test(name);
   return true;
+}
+
+/**
+ * A diet preference stated in the member's request ("I am vegan", "only veg", "no egg") — it
+ * overrides the profile for this plan. The strictest one mentioned wins. null = nothing stated.
+ */
+export function dietFromText(text: string | null | undefined): string[] | null {
+  const t = (text ?? '').toLowerCase();
+  if (!t.trim()) return null;
+  if (/\bvegan\b|plant[- ]based|no dairy|dairy[- ]free|without dairy|no milk/.test(t)) return ['vegan'];
+  const noEgg = /no eggs?\b|without eggs?|eggless|egg[- ]free|avoid eggs?|don'?t eat eggs?/.test(t);
+  if (/only veg|veg only|pure veg|vegetarian|\bveg\b|no (meat|chicken|fish|mutton|non[- ]?veg)|without (meat|chicken|non[- ]?veg)|jain/.test(t)) {
+    return !noEgg && /eggetarian|eggs? (are |is )?(ok|fine|allowed)|with eggs?|plus eggs?|and eggs?/.test(t) ? ['veg', 'egg'] : ['veg'];
+  }
+  if (/eggetarian/.test(t)) return ['veg', 'egg'];
+  return null;
 }
 
 export function isPlanFood(f: FoodCandidate): boolean {

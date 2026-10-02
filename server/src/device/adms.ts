@@ -43,7 +43,7 @@ adms.use('*', async (c, next) => {
 adms.get('/cdata', async (c) => {
   const sn = c.req.query('SN')!;
   await touchDevice(c.env, sn, c.req.header('cf-connecting-ip') ?? null, { pushver: c.req.query('pushver') ?? null });
-  return text(handshake(sn, tzOffset(c.env) / 60));
+  return text(handshake(sn, tzOffset(c.env)));
 });
 
 // Uploads: ATTLOG (punches), OPERLOG (users, fingerprints), others acknowledged
@@ -103,5 +103,5 @@ adms.post('/devicecmd', async (c) => {
 // Newer push protocol probes
 adms.all('/registry', (c) => text('RegistryCode=None'));
 adms.all('/ping', (c) => text('OK'));
-adms.all('/push', async (c) => text(handshake(c.req.query('SN')!, tzOffset(c.env) / 60)));
+adms.all('/push', async (c) => text(handshake(c.req.query('SN')!, tzOffset(c.env))));
 adms.all('/*', (c) => text('OK'));

@@ -134,6 +134,31 @@ check('week with a request: first session is the requested one, the rest stay ba
   r.data.days?.map((d: any) => d.type));
 sql(`DELETE FROM coach_usage WHERE member_id=${m.id}`);
 
+console.log('\n── production requests that went wrong (2026-10-01)');
+r = await call('POST', '/coach/workout', { span: 'day', notes: 'Provide back and biceps due to leg pain i cannot do leg today' });
+const bb = r.data.days?.[0];
+console.log(`    ${bb?.title}: ${bb?.items.map((i: any) => i.name).join(' | ')}`);
+check('back + biceps day', r.status === 200 && bb.type === 'custom' && bb.items.some((i: any) => i.slot === 'biceps') && bb.items.some((i: any) => ['vertical_pull', 'row'].includes(i.slot)), bb?.items.map((i: any) => i.slot));
+check('leg pain → not a single leg exercise or leg-driven cardio', !bb?.items.some((i: any) => ['squat', 'lunge', 'quad_iso', 'ham_curl', 'calves', 'glute', 'hinge'].includes(i.slot)
+  || /squat|lunge|leg (press|curl|extension)|calf|deadlift|treadmill|run|bike|cycl|elliptical|stair/i.test(i.name)), bb?.items.map((i: any) => i.name));
+await call('PUT', '/fit/profile', { age: 30, gender: 'male', height_cm: 170, weight_kg: 82, target_weight_kg: 72, goal: 'lose_weight', activity: 'light', workouts_per_week: 4, diet_pref: ['nonveg'] });
+r = await call('POST', '/coach/diet', { span: 'day', notes: 'Andhra Style Breakfast in vegan option, Lunch and Dinner can include south indian style only veg - remember only veg' });
+const vd = r.data.days?.[0];
+const animal = /paneer|curd|milk|yogurt|lassi|raita|ghee|butter|cheese|whey|buttermilk|egg|omelet|chicken|mutton|fish|prawn|keema/i;
+console.log(`    ${vd?.items.map((i: any) => `${i.slot[0]}:${i.name}`).join(' | ')}`);
+check('non-veg profile + "vegan / only veg" request → no meat, egg or dairy', r.status === 200 && vd.items.every((i: any) => i.veg === 'veg' && !animal.test(i.name)), vd?.items.map((i: any) => i.name));
+check('plan says it follows the request', /Following your request: vegan/.test(r.data.plan?.note), r.data.plan?.note);
+sql(`DELETE FROM coach_usage WHERE member_id=${m.id}`);
+
+console.log('\n── admin model order (Settings → AI coach models)');
+sql(`INSERT INTO settings (key, value) VALUES ('ai_models', '{"same":false,"diet":["@cf/cloudflare/clef-flash"],"workout":["@cf/qwen/qwen3-30b-a3b-fp8","@cf/cloudflare/clef-flash"]}')
+     ON CONFLICT(key) DO UPDATE SET value=excluded.value`);
+r = await call('POST', '/coach/workout', { span: 'day', focus: 'pull' });
+check(`workout uses the admin's first workout model (${r.data.plan?.model})`, r.status === 200 && r.data.plan.model === '@cf/qwen/qwen3-30b-a3b-fp8', r.data.plan?.model);
+r = await call('POST', '/coach/diet', { span: 'day' });
+check(`diet uses its own list (${r.data.plan?.model})`, r.status === 200 && r.data.plan.model === '@cf/cloudflare/clef-flash', r.data.plan?.model);
+sql(`DELETE FROM settings WHERE key='ai_models'; DELETE FROM coach_usage WHERE member_id=${m.id}`);
+
 console.log('\n── vegan preference');
 await call('PUT', '/fit/profile', { age: 30, gender: 'female', height_cm: 160, weight_kg: 50, goal: 'build_muscle', activity: 'moderate', workouts_per_week: 5, diet_pref: ['vegan'] });
 r = await call('POST', '/coach/diet', { span: 'day' });

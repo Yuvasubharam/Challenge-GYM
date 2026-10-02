@@ -109,6 +109,7 @@ function Overview() {
         <TopList title="Most-logged foods (30d)" icon={<Utensils className="w-4 h-4" />} rows={data.top_foods} empty="No food logged yet." />
         <TopList title="Most-logged exercises (30d)" icon={<Dumbbell className="w-4 h-4" />} rows={data.top_exercises} empty="No workouts logged yet." />
       </div>
+      <WeightProgress />
       <div className="card overflow-hidden">
         <p className="font-semibold px-4 pt-4 pb-2 flex items-center gap-2"><Users className="w-4 h-4" />Recently set up</p>
         {data.recent.length === 0 ? <p className="text-sm muted px-4 pb-5">Members appear here after finishing the setup questions in the member app.</p> : (
@@ -123,6 +124,71 @@ function Overview() {
     </div>
   );
 }
+
+interface WeightRow {
+  id: number; name: string; essl_id: string | null; goal: string | null; start_weight_kg: number | null; weight_kg: number | null; target_weight_kg: number | null;
+  entries: number; last_day: string | null; change: number; good_change: number; progress: number | null; weeks: number; days_since: number | null; overdue: boolean; reached: boolean;
+}
+interface WeightProgressData { totals: { tracking: number; weighed_7d: number; overdue: number; reached: number; kg_lost: number; kg_gained: number }; members: WeightRow[] }
+type WeightFilter = 'top' | 'overdue' | 'reached' | 'all';
+
+/** Members' weight journeys — success stories for promotions and a list of who needs a nudge. */
+function WeightProgress() {
+  const { data } = useLoad(() => api.get<WeightProgressData>('/fitness/weight-progress'));
+  const [f, setF] = useState<WeightFilter>('top');
+  const [rows, setRows] = useState(15);
+  const toast = useToast();
+  if (!data) return null;
+  const t = data.totals;
+  const list = data.members.filter((m) => f === 'top' ? m.good_change > 0 : f === 'overdue' ? m.overdue : f === 'reached' ? m.reached : true);
+  const promo = [t.kg_lost > 0 && `${t.kg_lost} kg lost`, t.kg_gained > 0 && `${t.kg_gained} kg of healthy gain`].filter(Boolean).join(' and ');
+  const promoLine = promo ? `Our members have tracked ${promo} with the Challenge Gym app${t.reached ? ` — ${t.reached} already hit their goal` : ''}! 💪` : '';
+  return (
+    <div className="card overflow-hidden">
+      <div className="px-4 pt-4 pb-2 flex flex-wrap items-center justify-between gap-3">
+        <p className="font-semibold">Weight progress</p>
+        <Chips<WeightFilter> value={f} onChange={(v) => { setF(v); setRows(15); }} options={[['top', 'Top progress'], ['overdue', `Overdue weigh-in (${t.overdue})`], ['reached', `Reached goal (${t.reached})`], ['all', 'All']]} />
+      </div>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 px-4 pb-3">
+        <MiniStat label="Tracking weight" value={t.tracking} />
+        <MiniStat label="Weighed in (7d)" value={t.weighed_7d} />
+        <MiniStat label="Total lost (kg)" value={t.kg_lost} />
+        <MiniStat label="Healthy gain (kg)" value={t.kg_gained} />
+      </div>
+      {promoLine && (
+        <div className="mx-4 mb-3 rounded-2xl bg-lime/15 p-3 text-sm flex items-start gap-3">
+          <span className="flex-1">{promoLine}</span>
+          <button className="btn btn-outline btn-sm shrink-0" onClick={() => navigator.clipboard?.writeText(promoLine).then(() => toast('ok', 'Copied'), () => toast('error', 'Could not copy'))}>Copy</button>
+        </div>
+      )}
+      {list.length === 0 ? <p className="text-sm muted px-4 pb-5">{f === 'overdue' ? 'Everyone has weighed in this week.' : 'No members here yet — they appear once they log weigh-ins in the member app.'}</p> : (
+        <div className="overflow-x-auto">
+          <table className="table">
+            <thead><tr><th>Member</th><th>Goal</th><th className="text-right">Start → now</th><th className="text-right">Change</th><th>To goal</th><th>Last weigh-in</th></tr></thead>
+            <tbody>{list.slice(0, rows).map((m) => (
+              <tr key={m.id}>
+                <td><Link to={`/members/${m.id}`} className="font-semibold hover:underline">{m.name}</Link> <span className="muted text-xs">#{m.essl_id ?? '—'}</span></td>
+                <td className="text-xs muted whitespace-nowrap">{m.goal ? GOAL[m.goal] ?? m.goal : '—'}{m.target_weight_kg ? ` · ${m.target_weight_kg} kg` : ''}</td>
+                <td className="text-right whitespace-nowrap text-sm">{m.start_weight_kg ?? '—'} → <b>{m.weight_kg ?? '—'}</b></td>
+                <td className={`text-right font-semibold whitespace-nowrap ${m.good_change > 0 ? 'text-ok' : m.good_change < 0 ? 'text-warn' : 'muted'}`}>{m.change > 0 ? '+' : ''}{m.change} kg{m.weeks ? <span className="muted font-normal text-xs"> / {m.weeks}w</span> : null}</td>
+                <td className="min-w-28">{m.progress === null ? <span className="muted text-xs">no target</span> : (
+                  <div className="flex items-center gap-2"><div className="h-1.5 flex-1 rounded-full bg-black/5 dark:bg-white/10 overflow-hidden"><div className="h-full bg-lime" style={{ width: `${m.progress}%` }} /></div><span className="text-xs w-9 text-right">{m.progress}%</span></div>
+                )}</td>
+                <td className={`text-xs whitespace-nowrap ${m.overdue ? 'text-warn' : 'muted'}`}>{m.days_since === null ? 'never' : m.days_since === 0 ? 'today' : `${m.days_since}d ago`}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+      {list.length > rows && <div className="p-3 text-center border-t border-paper-line dark:border-ink-700"><button className="btn btn-outline btn-sm" onClick={() => setRows(rows + 50)}>More</button></div>}
+      <p className="text-[11px] muted px-4 py-3 border-t border-paper-line dark:border-ink-700">Ask the member before sharing their name, photo or numbers publicly. Weigh-in reminders are set under Settings → Weigh-in reminders.</p>
+    </div>
+  );
+}
+
+const MiniStat = ({ label, value }: { label: string; value: number }) => (
+  <div className="rounded-2xl bg-black/[.03] dark:bg-white/[.04] p-3"><p className="text-xs muted">{label}</p><p className="font-display text-xl font-bold">{value}</p></div>
+);
 
 const Kpi = ({ label, value, sub, to }: { label: string; value: number; sub: string; to?: string }) => {
   const body = <div className="card card-pad h-full"><p className="text-xs font-semibold muted">{label}</p><p className="kpi mt-3">{value}</p><p className="text-xs muted mt-2">{sub}</p></div>;

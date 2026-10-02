@@ -4,6 +4,7 @@ import { Hono } from 'hono';
 import type { AppEnv, Env } from '../env';
 import { HttpError } from '../lib/db';
 import { renewalCron } from '../lib/renewalPush';
+import { weightCron } from '../lib/weightPush';
 import { bumpAdminVersion } from '../lib/viewCache';
 import { auth } from '../routes/admin/auth';
 import { members } from '../routes/admin/members';
@@ -66,9 +67,11 @@ app.notFound((c) => c.json({ error: 'Not found' }, 404));
 
 export default {
   fetch: app.fetch,
-  // Hourly: the daily renewal reminder goes out on the first run at/after the configured hour.
-  // Runs here because only this worker holds the VAPID private key.
+  // Hourly: the daily renewal reminder goes out on the first run at/after the configured hour,
+  // the weekly weigh-in reminder on the configured weekday. Runs here because only this worker
+  // holds the VAPID private key.
   async scheduled(_evt: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(renewalCron(env).then((r) => console.log('renewal-push', JSON.stringify(r))));
+    ctx.waitUntil(weightCron(env).then((r) => console.log('weight-push', JSON.stringify(r))));
   },
 };

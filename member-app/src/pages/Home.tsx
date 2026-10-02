@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { WeighInPrompt, WeightSheet } from '../components/weight';
 import { ArrowRight, CalendarDays, Clock3, DoorClosed, DoorOpen, Dumbbell, Flame, GlassWater, Scale, Snowflake, Utensils, Wallet } from 'lucide-react';
 import { api } from '../lib/api';
 import { date, money } from '../lib/format';
@@ -11,10 +13,11 @@ import { BellButton, Carousel, GalleryStrip, NewsStrip, ShopStrip } from '../com
 
 export default function Home() {
   const { home: h, error, reload } = useHome();
-  const { fit, edit } = useFit();
+  const { fit, edit, reload: reloadFit } = useFit();
   const { data: day, reload: reloadDay } = useLoad(() => api.get<Day>('/fit/day'));
   const { data: cms } = useLoad(() => api.get<HomeContent>('/content/home'));
   const { run } = useAction();
+  const [logW, setLogW] = useState(false);
   const toast = useToast();
   if (error) return <ErrorBox error={error} onRetry={reload} />;
   if (!h) return <PageLoader />;
@@ -75,6 +78,10 @@ export default function Home() {
           <ArrowRight className="w-5 h-5 text-ink-300" />
         </button>
       ) : null}
+
+      {fit?.weigh_in && <WeighInPrompt w={fit.weigh_in} onLog={() => setLogW(true)} />}
+      {logW && <WeightSheet current={fit?.weigh_in?.last_kg ?? prof?.weight_kg ?? 70} onClose={() => setLogW(false)}
+        onSaved={() => { setLogW(false); void reloadFit(); }} />}
 
       {/* Quick actions */}
       <section className="grid grid-cols-4 gap-2">

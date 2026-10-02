@@ -11,6 +11,18 @@ export interface FitProfile {
   bmr: number | null; tdee: number | null; goal_progress: number | null; targets: Targets;
 }
 
+/** Weekly weigh-in: due once the last entry is 7+ days old. */
+export interface WeighIn { last_day: string | null; last_kg: number | null; days_since: number | null; due: boolean; next_due: string }
+export type WeightView = 'day' | 'week' | 'month';
+export type WeightStatus = 'reached' | 'on_track' | 'slow' | 'off_track' | 'steady' | 'drifting' | 'new';
+export interface WeightTrend extends WeighIn {
+  current: number | null; start: number | null; target: number | null; goal: Goal | null;
+  change_total: number | null; change_7d: number | null; change_30d: number | null; weekly_rate: number | null;
+  to_go: number | null; status: WeightStatus; eta: string | null; entries: number;
+}
+/** GET /fit/weight */
+export interface WeightHistory { view: WeightView; points: { day: string; weight_kg: number; n: number }[]; trend: WeightTrend; entries: { day: string; weight_kg: number }[] }
+
 export interface Food { id: number; name: string; kcal: number; protein: number; carbs: number; fat: number; serving_g: number; serving_label: string; veg: 'veg' | 'egg' | 'nonveg' | null; source: string; owner_member_id: number | null; image?: string | null; has_recipe?: number }
 /** GET /fit/foods/:id — one food with its photo credit and recipe. */
 export interface FoodDetail extends Food { fiber: number | null; sugar: number | null; sodium_mg: number | null; image_credit: string | null; ingredients: string[]; steps: string[]; recipe_serves: number | null; recipe_min: number | null }

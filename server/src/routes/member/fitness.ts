@@ -10,6 +10,8 @@ import {
   ACTIVITIES, GOALS, ageFromBirthYear, bmi, bmiCategory, dailyTargets, healthyWeightRange, round, type Activity, type Goal, type SetEntry, type Sex,
 } from '../../lib/fitness';
 import { logFood, logWorkout } from '../../lib/fitlog';
+import { bucketWeights, weighIn, weightTrend, type WeightRow } from '../../lib/weightTrack';
+import { memberWeights } from '../../lib/weightPush';
 import { serveExerciseMedia } from '../../lib/exerciseMedia';
 import { exerciseCatalog, FOOD_LIST_COLS, foodCatalog, strip, type ExRow, type FoodRow } from '../../lib/catalog';
 
@@ -75,8 +77,12 @@ async function refreshTargets(env: Env, memberId: number) {
 
 // ── Profile / onboarding ────────────────────────────────────────────────
 fit.get('/profile', async (c) => {
-  const { p, sex } = await loadProfile(c.env, mid(c));
-  return c.json({ onboarded: !!p?.onboarded_at, profile: describe(p, sex, todayFor(c.env)), raw: p });
+  const [{ p, sex }, last] = await Promise.all([
+    loadProfile(c.env, mid(c)),
+    first<WeightRow>(c.env.DB, `SELECT day, weight_kg FROM weight_logs WHERE member_id=? ORDER BY day DESC LIMIT 1`, mid(c)),
+  ]);
+  const today = todayFor(c.env);
+  return c.json({ onboarded: !!p?.onboarded_at, profile: describe(p, sex, today), raw: p, weigh_in: p?.onboarded_at ? weighIn(last, today) : null });
 });
 
 /** Onboarding + edits. Body: age, gender, height_cm, weight_kg, target_weight_kg, goal, activity, workouts_per_week, diet_pref, [targets]. */
@@ -314,6 +320,17 @@ fit.put('/water', async (c) => {
   return c.json({ ml });
 });
 
+/** Weight history for the Progress chart. view = day (each weigh-in) | week | month (averages); trend vs goal. */
+fit.get('/weight', async (c) => {
+  const id = mid(c);
+  const view = (['day', 'week', 'month'] as const).find((v) => v === c.req.query('view')) ?? 'week';
+  const today = todayFor(c.env);
+  const { rows, p } = await memberWeights(c.env, id);
+  // Last 90 weigh-ins / 26 weeks / 24 months keep the chart readable
+  const points = bucketWeights(rows, view).slice(view === 'day' ? -90 : view === 'week' ? -26 : -24);
+  return c.json({ view, points, trend: weightTrend(rows, p, today), entries: rows.slice(-30).reverse() });
+});
+
 fit.post('/weight', async (c) => {
   const b = await c.req.json();
   const id = mid(c);
@@ -321,20 +338,28 @@ fit.post('/weight', async (c) => {
   const kg = Number(b.weight_kg);
   assert(kg >= 30 && kg <= 250, 400, 'Enter your weight in kg (30–250)');
   await run(c.env.DB, `INSERT INTO weight_logs (member_id, day, weight_kg) VALUES (?, ?, ?) ON CONFLICT(member_id, day) DO UPDATE SET weight_kg=excluded.weight_kg`, id, date, round(kg, 1));
-  // Latest weight drives BMI and targets
-  const latest = await first<{ weight_kg: number }>(c.env.DB, `SELECT weight_kg FROM weight_logs WHERE member_id=? ORDER BY day DESC LIMIT 1`, id);
-  await run(c.env.DB, `UPDATE fitness_profiles SET weight_kg=?, updated_at=? WHERE member_id=?`, latest!.weight_kg, nowIso(), id);
-  await refreshTargets(c.env, id);
-  const { p, sex } = await loadProfile(c.env, id);
-  return c.json({ ok: true, profile: describe(p, sex, todayFor(c.env)) });
+  await syncLatestWeight(c.env, id);
+  const [{ p, sex }, w] = await Promise.all([loadProfile(c.env, id), memberWeights(c.env, id)]);
+  const today = todayFor(c.env);
+  return c.json({ ok: true, profile: describe(p, sex, today), trend: weightTrend(w.rows, w.p, today) });
 });
 
 fit.delete('/weight/:day', async (c) => {
   const day = c.req.param('day');
+  const id = mid(c);
   assert(isDate(day), 400, 'Bad date');
-  await run(c.env.DB, `DELETE FROM weight_logs WHERE member_id=? AND day=?`, mid(c), day);
+  await run(c.env.DB, `DELETE FROM weight_logs WHERE member_id=? AND day=?`, id, day);
+  await syncLatestWeight(c.env, id);
   return c.json({ ok: true });
 });
+
+/** Latest weigh-in drives the profile weight, BMI and targets (also after deleting the newest entry). */
+async function syncLatestWeight(env: Env, id: number) {
+  const latest = await first<{ weight_kg: number }>(env.DB, `SELECT weight_kg FROM weight_logs WHERE member_id=? ORDER BY day DESC LIMIT 1`, id);
+  if (!latest) return;
+  await run(env.DB, `UPDATE fitness_profiles SET weight_kg=?, updated_at=? WHERE member_id=?`, latest.weight_kg, nowIso(), id);
+  await refreshTargets(env, id);
+}
 
 // ── Exercise library ────────────────────────────────────────────────────
 const EX_COLS = `id, name, body_part, target, equipment, category, level, images, met, tracking, popular`;

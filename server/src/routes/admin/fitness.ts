@@ -6,7 +6,7 @@ import { actor, requireAdmin } from '../../lib/auth';
 import { all, assert, audit, first, int, nowIso, run, str } from '../../lib/db';
 import { adminExerciseCatalog, bumpCatalogVersion, countBy, exerciseUseCounts, type AdminExRow } from '../../lib/catalog';
 import { UPLOAD_RE, UPLOAD_TYPES, isImagePath, isVideoUpload, mediaKey, serveExerciseMedia } from '../../lib/exerciseMedia';
-import { addDays, today as todayOf } from '../../lib/dates';
+import { addDays, diffDays, today as todayOf } from '../../lib/dates';
 
 export const fitnessAdmin = new Hono<AppEnv>();
 fitnessAdmin.use('*', requireAdmin());
@@ -40,7 +40,47 @@ fitnessAdmin.get('/overview', async (c) => {
   return c.json({ counts, goals, diets: dietCounts, top_foods: topFoods, top_exercises: topExercises, recent });
 });
 
-type ExSorter = (a: AdminExRow & { uses: number }, b: AdminExRow & { uses: number }) => number;
+/**
+ * Weight progress across members: who is on track, overdue for a weigh-in, or has reached their goal,
+ * plus gym-wide totals ("members lost 120 kg together") for success stories and promotions.
+ */
+fitnessAdmin.get('/weight-progress', async (c) => {
+  const today = todayOf(tzOffset(c.env));
+  const rows = await all<{ id: number; name: string; essl_id: string | null; goal: string | null; start_weight_kg: number | null; weight_kg: number | null;
+    target_weight_kg: number | null; entries: number; first_day: string | null; last_day: string | null }>(c.env.DB,
+    `SELECT m.id, m.name, m.essl_id, p.goal, p.start_weight_kg, p.weight_kg, p.target_weight_kg,
+            COUNT(w.day) AS entries, MIN(w.day) AS first_day, MAX(w.day) AS last_day
+     FROM fitness_profiles p JOIN members m ON m.id=p.member_id LEFT JOIN weight_logs w ON w.member_id=p.member_id
+     WHERE p.onboarded_at IS NOT NULL AND m.archived=0 GROUP BY p.member_id`);
+  const r1 = (n: number) => Math.round(n * 10) / 10;
+  const members = rows.map((r) => {
+    const start = r.start_weight_kg ?? r.weight_kg;
+    const change = start !== null && r.weight_kg !== null ? r1(r.weight_kg - start) : 0;
+    // Positive = moved the way the goal wants (loss for lose_weight, gain for gain/build)
+    const dir = r.target_weight_kg !== null && start !== null && r.target_weight_kg !== start ? Math.sign(r.target_weight_kg - start)
+      : r.goal === 'lose_weight' ? -1 : r.goal === 'gain_weight' || r.goal === 'build_muscle' ? 1 : 0;
+    const progress = r.target_weight_kg !== null && start !== null && start !== r.target_weight_kg && r.weight_kg !== null
+      ? Math.max(0, Math.min(100, Math.round(((start - r.weight_kg) / (start - r.target_weight_kg)) * 100))) : null;
+    const daysSince = r.last_day ? diffDays(today, r.last_day) : null;
+    return { ...r, start_weight_kg: start, change, good_change: r1(change * dir), progress, weeks: r.first_day && r.last_day ? Math.max(0, Math.round(diffDays(r.last_day, r.first_day) / 7)) : 0,
+      days_since: daysSince, overdue: daysSince === null || daysSince >= 7, reached: progress === 100 };
+  }).sort((a, b) => b.good_change - a.good_change || (b.progress ?? 0) - (a.progress ?? 0));
+  const sum = (f: (m: (typeof members)[number]) => number) => r1(members.reduce((a, m) => a + f(m), 0));
+  return c.json({
+    totals: {
+      tracking: members.length,
+      weighed_7d: members.filter((m) => !m.overdue).length,
+      overdue: members.filter((m) => m.overdue).length,
+      reached: members.filter((m) => m.reached).length,
+      // Only count change in the direction each member wanted
+      kg_lost: sum((m) => (m.goal === 'lose_weight' && m.change < 0 ? -m.change : 0)),
+      kg_gained: sum((m) => ((m.goal === 'gain_weight' || m.goal === 'build_muscle') && m.change > 0 ? m.change : 0)),
+    },
+    members,
+  });
+});
+
+type ExSorter =(a: AdminExRow & { uses: number }, b: AdminExRow & { uses: number }) => number;
 const byName: ExSorter = (a, b) => a._name.localeCompare(b._name);
 const EX_SORTS: Record<string, ExSorter> = {
   popular: (a, b) => b.popular - a.popular || Number(b.images != null) - Number(a.images != null) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { AI_MODELS, askJson, extractJson } from '../src/lib/ai';
 import type { Env } from '../src/env';
 import {
-  SLOTS, avoidPattern, balanceDay, daySlots, dayTotals, dietAllows, guardSlots, mealIssues, mealRoles, mergeDuplicates, partitionDishes, planDays, prescribe, readRequest, requestedDay, requestedTitle,
+  SLOTS, avoidPattern, balanceDay, dietCandidates, dietFromText, daySlots, dayTotals, dietAllows, guardSlots, mealIssues, mealRoles, mergeDuplicates, partitionDishes, planDays, prescribe, readRequest, requestedDay, requestedTitle,
   resolvePicks, roundGrams, scaleDay, slotCandidates,
   type ExCandidate, type FoodCandidate,
 } from '../src/lib/planner';
@@ -200,5 +200,39 @@ describe('meal roles for the decision model', () => {
     expect(roles['lunch.dish']).not.toContain(5);
     expect(roles['lunch.protein']).toEqual(expect.arrayContaining([9, 13]));
     expect(roles['snacks.snack1']).toEqual(expect.arrayContaining([11, 12]));
+  });
+});
+describe('the two production requests that went wrong (2026-10-01)', () => {
+  it('"back and biceps due to leg pain i cannot do leg today" → back + biceps, legs protected', () => {
+    const r = readRequest('Provide back and biceps due to leg pain i cannot do leg today');
+    expect(r.muscles.sort()).toEqual(['biceps', 'lats', 'lower_back', 'upper_back']);
+    expect(r.avoid).toEqual(['legs']);
+    const day = requestedDay(r.muscles, 'lose_weight', r.avoid);
+    expect(day).toEqual(expect.arrayContaining(['vertical_pull', 'row', 'biceps']));
+    for (const s of ['squat', 'lunge', 'quad_iso', 'ham_curl', 'calves', 'glute', 'hinge']) expect(day).not.toContain(s);
+    const legMove = avoidPattern(r.avoid)!;
+    expect(['Barbell Full Squat', 'Leg Press', 'Seated Leg Curl', 'Calf Press', 'Barbell Deadlift', 'Treadmill running', 'Stationary cycling'].every((n) => legMove.test(n))).toBe(true);
+    expect(legMove.test('Cable Pulldown')).toBe(false);
+    expect(legMove.test('Rowing machine')).toBe(false); // seated, arm-led cardio is fine
+  });
+  it('other phrasings of "my legs hurt"', () => {
+    expect(readRequest('legpain, only upper body').avoid).toEqual(['legs']);
+    expect(readRequest('I cant train legs this week, give me chest').muscles).toEqual(['chest']);
+    expect(readRequest('back and legs').muscles).toEqual(expect.arrayContaining(['lats', 'quads']));
+    expect(readRequest('my back hurts so only arms')).toEqual({ muscles: ['biceps', 'triceps'], avoid: ['lower_back'] });
+  });
+  it('"vegan … only veg" in the request overrides a non-veg profile', () => {
+    expect(dietFromText('Andhra Style Breakfast in vegan option, Lunch and Dinner can include south indian style only veg - remember only veg')).toEqual(['vegan']);
+    expect(dietFromText('only veg please')).toEqual(['veg']);
+    expect(dietFromText('pure veg, eggs are fine')).toEqual(['veg', 'egg']);
+    expect(dietFromText('vegetarian, no egg')).toEqual(['veg']);
+    expect(dietFromText('South Indian breakfast please')).toBeNull();
+    const pool = [food(1, 'Chicken curry', 160, 14, 200, '1 bowl', 'cg', 'nonveg'), food(2, 'Egg curry (Andhra style)', 140, 7.5, 200, '1 bowl', 'cg', 'egg'),
+      food(3, 'Egg drop soup', 27, 12.9, 200, '1 bowl', 'indb', 'veg'), food(4, 'Paneer bhurji', 230, 13, 150, '1 bowl', 'cg'), food(5, 'Dal tadka', 115, 5.5, 200, '1 bowl', 'cg'),
+      food(6, 'Curd / plain yogurt', 61, 3.5, 150, '1 bowl', 'basic')];
+    const vegan = dietCandidates(pool, [], [], ['vegan']).map((f) => f.name);
+    expect(vegan).toEqual(['Dal tadka']);
+    const veg = dietCandidates(pool, [], [], ['veg']).map((f) => f.name).sort();
+    expect(veg).toEqual(['Curd / plain yogurt', 'Dal tadka', 'Paneer bhurji']); // mis-tagged "Egg drop soup" is out too
   });
 });

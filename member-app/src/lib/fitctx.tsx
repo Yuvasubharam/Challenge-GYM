@@ -1,12 +1,12 @@
 import { createContext, useContext, useState, type ReactNode } from 'react';
 import { api } from './api';
-import type { FitProfile } from './fit';
+import type { FitProfile, WeighIn } from './fit';
 import type { RawProfile } from '../pages/Onboarding';
 import Onboarding from '../pages/Onboarding';
 import { PageLoader, useLoad } from '../components/ui';
 import { useHome } from './home';
 
-interface ProfileRes { onboarded: boolean; profile: FitProfile | null; raw: RawProfile | null }
+interface ProfileRes { onboarded: boolean; profile: FitProfile | null; raw: RawProfile | null; weigh_in: WeighIn | null }
 interface Ctx { fit: ProfileRes | null; reload: () => Promise<void>; edit: () => void }
 const FitCtx = createContext<Ctx>({ fit: null, reload: async () => {}, edit: () => {} });
 export const useFit = () => useContext(FitCtx);

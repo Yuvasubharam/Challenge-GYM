@@ -92,8 +92,17 @@ export async function claimForAdms(env: Env, sn: string, max = 6): Promise<strin
         break;
       case 'unblock': {
         const m = await memberForPin(env, pin);
-        lines = [userInfoLine({ pin, name: payload.name ?? m?.name ?? pin, card: payload.card })];
-        for (const t of await templatesFor(env, pin)) lines.push(fingerLine(pin, t));
+        const tpls = await templatesFor(env, pin);
+        const du = await first<{ fp_count: number | null }>(env.DB, `SELECT fp_count FROM device_users WHERE essl_id=?`, pin);
+        // The X990 keeps its own per-user validity (set at the terminal in the pre-cloud days) that
+        // UPDATE USERINFO does not touch: the finger is recognised, then rejected (ATTLOG status 254).
+        // Delete-then-re-add clears it — but only when the cloud backup holds every finger the device has.
+        const fullBackup = tpls.length > 0 && (du?.fp_count == null || tpls.length >= du.fp_count);
+        lines = [
+          ...(fullBackup ? [deleteUserLine(pin)] : []),
+          userInfoLine({ pin, name: payload.name ?? m?.name ?? pin, card: payload.card }),
+          ...tpls.map((t) => fingerLine(pin, t)),
+        ];
         break;
       }
       case 'block': {
@@ -185,7 +194,9 @@ export async function applyAdmsReplies(env: Env, replies: { id: number; ret: num
   for (const id of touched) {
     const pendingLines = await first<{ n: number; bad: number }>(
       env.DB,
-      `SELECT SUM(return_code IS NULL) AS n, SUM(return_code IS NOT NULL AND return_code <> 0) AS bad FROM adms_lines WHERE command_id=?`,
+      // A DELETE of a user that is already absent returns non-zero; the goal (user gone) is still met.
+      `SELECT SUM(return_code IS NULL) AS n, SUM(return_code IS NOT NULL AND return_code <> 0 AND line NOT LIKE 'DATA DELETE USERINFO %') AS bad
+       FROM adms_lines WHERE command_id=?`,
       id,
     );
     if (pendingLines && pendingLines.n > 0) continue;
@@ -214,7 +225,11 @@ export async function claimForAgent(env: Env, max = 10) {
   const pending = await all<CommandRow>(env.DB, `SELECT * FROM device_commands WHERE status='pending' ORDER BY id LIMIT ?`, max);
   const out = [];
   let defaultBlockMethod: string | undefined;
+  // Unblocks go to ADMS first (it polls every ~10 s): its delete + re-add clears the device-side
+  // expiry, which the agent's set_user does not. The agent takes them only if ADMS hasn't in 2 minutes.
+  const adMsFirst = new Date(Date.now() - 2 * 60_000).toISOString();
   for (const cmd of pending) {
+    if (cmd.action === 'unblock' && cmd.created_at > adMsFirst) continue;
     if (!(await claim(env, cmd.id, null, 'agent'))) continue;
     const payload = cmd.payload ? JSON.parse(cmd.payload) : {};
     const m = cmd.essl_id ? await memberForPin(env, cmd.essl_id) : null;
@@ -370,7 +385,34 @@ export async function ingestPunches(env: Env, punches: AttPunch[], source: 'adms
     const res = await env.DB.batch(stmts.slice(i, i + 50));
     inserted += res.reduce((n, r) => n + (r.meta.changes ?? 0), 0);
   }
+  const rejected = [...new Set(punches.filter((p) => p.status === DEVICE_REJECTED).map((p) => p.pin))];
+  if (rejected.length) await healRejected(env, rejected);
   return { inserted, skipped: punches.length - inserted };
+}
+
+/** ATTLOG status the X990 writes when it recognises a finger but refuses entry (device-side expiry). */
+export const DEVICE_REJECTED = 254;
+
+/**
+ * A member we allow was turned away at the door: queue a delete + re-add (see claimForAdms 'unblock'),
+ * which clears the device's own stale expiry. At most once per member per 30 minutes.
+ */
+async function healRejected(env: Env, pins: string[]) {
+  const s = await getSettings(env.DB);
+  const today = todayOf(tzOffset(env));
+  const since = new Date(Date.now() - 30 * 60_000).toISOString();
+  for (const pin of pins.slice(0, 10)) {
+    if (!isSafePin(pin)) continue;
+    const r = await first<{ id: number; name: string; is_staff: number; access_override: 'allow' | 'deny' | null; frozen_from: string | null;
+      frozen_until: string | null; end_date: string | null; recent: number }>(env.DB,
+      `SELECT m.id, m.name, m.is_staff, m.access_override, m.frozen_from, m.frozen_until,
+              (SELECT MAX(end_date) FROM memberships WHERE member_id=m.id AND status='active') AS end_date,
+              EXISTS(SELECT 1 FROM device_commands c WHERE c.essl_id=m.essl_id AND c.action IN ('block','unblock')
+                     AND (c.status IN ('pending','sent') OR c.created_at > ?)) AS recent
+       FROM members m WHERE m.essl_id=? AND m.archived=0`, since, pin);
+    if (!r || r.recent || !accessAllowed(r, today, s.access)) continue;
+    await queueCommand(env, { essl_id: pin, action: 'unblock', payload: { name: r.name }, reason: 'rejected at door — device reset', by: 'auto-heal' });
+  }
 }
 
 export async function ingestOperlog(env: Env, data: { users: OperUser[]; fps: OperFp[] }, source: string) {

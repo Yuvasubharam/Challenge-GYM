@@ -99,5 +99,5 @@ export async function reminderFor(env: Env, memberId: number, latestPostPushedAt
   if (!m?.end_date) return null;
   const settings = await getSettings(env.DB);
   const msg = renderReminder(settings.renewal_push, settings.gym.name, { name: m.name, end_date: m.end_date }, r.day);
-  return { id: `renew-${r.day}`, kind: 'renewal', title: msg.title, body: msg.body, image_key: null, cta_link: '/plan' };
+  return { id: `renew-${r.day}`, kind: 'renewal', title: msg.title, body: msg.body, image_key: null, cta_link: '/plan', sent_at: r.sent_at };
 }

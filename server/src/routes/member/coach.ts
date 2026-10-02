@@ -7,13 +7,13 @@ import type { AppEnv, Env } from '../../env';
 import { requireMember } from '../../lib/auth';
 import { all, assert, first, int, run, str } from '../../lib/db';
 import { addDays, isDate } from '../../lib/dates';
-import { askClef, askJson, clefChoice, CLEF_MODEL, type ChatMessage, type ClefQuestion } from '../../lib/ai';
+import { askClef, askJson, clefChoice, CLEF_MODEL, modelsFor, type ChatMessage, type ClefQuestion } from '../../lib/ai';
 import { exerciseCatalog, foodCatalog } from '../../lib/catalog';
 import { ageFromBirthYear, bmi, bmiCategory, round, type Goal } from '../../lib/fitness';
 import { logFood, logWorkout, MEAL_KEYS } from '../../lib/fitlog';
 import {
   DAY_TITLE, FOCUSES, JOINT_LABEL, MEAL_SPLIT, MUSCLES, SLOTS, avoidPattern, balanceDay, dayTotals, daySlots, dietCandidates, guardSlots, isProteinFood, macrosFor, mealIssues, mealRoles,
-  mergeDuplicates, partitionDishes, planDays, prescribe, readRequest, requestedDay, requestedTitle, resolvePicks, roundGrams, scaleDay, slotCandidates,
+  mergeDuplicates, partitionDishes, planDays, prescribe, readRequest, requestedDay, withoutAvoided, dietFromText, JOINT_MUSCLES, requestedTitle, resolvePicks, roundGrams, scaleDay, slotCandidates,
   type DayType, type ExCandidate, type FoodCandidate, type Joint, type Muscle, type PlannedFood,
 } from '../../lib/planner';
 import { loadProfile, todayFor, type Profile } from './fitness';
@@ -73,32 +73,36 @@ const countUse = (env: Env, memberId: number, today: string) =>
   run(env.DB, `INSERT INTO coach_usage (member_id, day, n) VALUES (?, ?, 1) ON CONFLICT(member_id, day) DO UPDATE SET n=n+1`, memberId, today);
 
 /**
- * What the member asked for: muscles to train and joints to protect. Keyword rules always run;
- * Clef-flash reads the request too (any wording or language) and its confident answers are added.
+ * What the member asked for: muscles to train and joints/regions to protect. Keyword rules always
+ * run. Clef-flash (when enabled for workouts) also reads the request: its "pain / can't train"
+ * answers are always added, its muscle answers only when the keywords found none — and a painful
+ * region always wins over a request ("back and biceps, leg pain" never becomes a leg day).
  */
-async function understandRequest(env: Env, notes: string | null): Promise<{ muscles: Muscle[]; avoid: Joint[] }> {
+async function understandRequest(env: Env, notes: string | null, useClef: boolean): Promise<{ muscles: Muscle[]; avoid: Joint[] }> {
   const kw = readRequest(notes);
-  if (!notes) return kw;
+  if (!notes || !useClef) return kw;
   const q: Record<string, ClefQuestion> = {};
   for (const [m, def] of Object.entries(MUSCLES)) {
-    q[`m_${m}`] = { type: 'noul', instructions: `Does the member ask to train or work on their ${def.label}? Mentioning pain or injury there is NOT a request to train it.` };
+    q[`m_${m}`] = { type: 'noul', instructions: `Does the member ask to TRAIN their ${def.label} in this workout? Answer no if they only mention pain, an injury or that they cannot train it.` };
   }
   for (const [j, label] of Object.entries(JOINT_LABEL)) {
-    q[`j_${j}`] = { type: 'noul', instructions: `Does the member mention pain, an injury or a problem with their ${label}?` };
+    q[`j_${j}`] = { type: 'noul', instructions: `Does the member say their ${label} hurt, are injured, or that they cannot or should not train their ${label}?` };
   }
   try {
     const a = await askClef(env, `A gym member wrote this request for their workout plan: "${notes}"`, q);
     const muscles = new Set<Muscle>(kw.muscles);
     const avoid = new Set<Joint>(kw.avoid);
-    for (const m of Object.keys(MUSCLES) as Muscle[]) if ((a[`m_${m}`]?.noul ?? 0) >= 0.7) muscles.add(m);
-    for (const j of Object.keys(JOINT_LABEL) as Joint[]) if ((a[`j_${j}`]?.noul ?? 0) >= 0.6) avoid.add(j);
-    // Keep the request's own order for muscles the keywords found, then Clef's additions.
-    return { muscles: [...muscles], avoid: [...avoid] };
+    if (!kw.muscles.length) for (const m of Object.keys(MUSCLES) as Muscle[]) if ((a[`m_${m}`]?.noul ?? 0) >= 0.8) muscles.add(m);
+    // Clef's pain answers never cancel muscles the member explicitly asked for ("leg day, knee pain" stays a leg day without knee-loading moves).
+    const asked = new Set(kw.muscles);
+    for (const j of Object.keys(JOINT_LABEL) as Joint[]) {
+      if ((a[`j_${j}`]?.noul ?? 0) >= 0.6 && !JOINT_MUSCLES[j].some((m) => asked.has(m))) avoid.add(j);
+    }
+    return withoutAvoided([...muscles], [...avoid]);
   } catch {
     return kw;
   }
 }
-
 /** Replace the member's current plan of this kind with a new one (old items' logs stay in the diary). */
 async function savePlan(env: Env, memberId: number, kind: 'diet' | 'workout', span: string, start: string, days: number, meta: PlanMeta, model: string,
   items: Record<string, unknown>[]) {
@@ -184,7 +188,10 @@ coach.post('/diet', async (c) => {
   assert(p?.onboarded_at && p.kcal_target, 400, 'Set up your fitness profile first (Me → Fitness profile) so the coach knows your targets.');
   await checkQuota(c.env, id, today);
 
-  const prefs = p.diet_pref ? p.diet_pref.split(',') : [];
+  // A preference stated in the request ("I am vegan", "only veg") overrides the profile for this plan.
+  const askedDiet = dietFromText(notes);
+  const prefs = askedDiet ?? (p.diet_pref ? p.diet_pref.split(',') : []);
+  const dietModels = await modelsFor(c.env, 'diet');
   const [shared, own, recent] = await Promise.all([
     foodCatalog(c.env),
     all<FoodCandidate>(c.env.DB, `SELECT id, name, kcal, protein, carbs, fat, serving_g, serving_label, veg, source, uses FROM foods WHERE owner_member_id=? AND active=1`, id),
@@ -200,7 +207,7 @@ coach.post('/diet', async (c) => {
 
   type DayOut = { tip: string | null; note: string | null; items: PlannedFood[] };
   /** One day = one small agent run: plan → we check the real totals → the model revises once if protein is short. */
-  const planDay = async (pool: FoodCandidate[], date: string): Promise<DayOut & { model: string }> => {
+  const planDay = async (pool: FoodCandidate[], date: string, models: string[]): Promise<DayOut & { model: string }> => {
     const byId = new Map(pool.map((f) => [f.id, f]));
     const messages: ChatMessage[] = [
       { role: 'system', content: 'You are a certified sports nutritionist at an Indian gym. You plan realistic, affordable, home-style Indian meals that hit calorie and protein targets. Reply with one JSON object only.' },
@@ -250,12 +257,12 @@ coach.post('/diet', async (c) => {
         ...mealIssues(items),
       ];
     };
-    const first = await askJson(c.env, messages, validate, 1500);
+    const first = await askJson(c.env, messages, validate, 1500, models);
     const found = issues(first.result.items);
     if (!found.length) return { ...first.result, model: first.model };
     const compact = { tip: first.result.tip, ...Object.fromEntries(MEAL_KEYS.map((m) => [m, first.result.items.filter((x) => x.meal === m).map((x) => [x.food.id, round(x.grams / x.food.serving_g, 1)])])) };
     const revised = await askJson(c.env, [...messages, { role: 'assistant', content: JSON.stringify(compact) }, { role: 'user', content:
-      `I checked your plan against the food list and found:\n- ${found.join('\n- ')}\nRevise it to fix these (lunch and dinner = a grain + a cooked dish + a protein item). Same JSON format.` }], validate, 1500).catch(() => null);
+      `I checked your plan against the food list and found:\n- ${found.join('\n- ')}\nRevise it to fix these (lunch and dinner = a grain + a cooked dish + a protein item). Same JSON format.` }], validate, 1500, models).catch(() => null);
     const better = revised && issues(revised.result.items).length < found.length;
     return better ? { ...revised.result, note: first.result.note ?? revised.result.note, model: revised.model } /* the revision's note talks about the fixes */ : { ...first.result, model: first.model };
   };
@@ -295,7 +302,14 @@ coach.post('/diet', async (c) => {
     return { tip: DIET_TIPS[i % DIET_TIPS.length], note: null, items, model: CLEF_MODEL };
   };
 
-  const settled = await Promise.allSettled(pools.map((pool, i) => planDayClef(pool, addDays(start, i), i).catch(() => planDay(pool, addDays(start, i)))));
+  // Models in the admin's order (Settings → AI coach models): Clef-flash or a chat model, next on failure.
+  const planWith = async (pool: FoodCandidate[], date: string, i: number) => {
+    for (const m of dietModels) {
+      try { return m === CLEF_MODEL ? await planDayClef(pool, date, i) : await planDay(pool, date, [m]); } catch { /* next model */ }
+    }
+    throw new Error('every model failed');
+  };
+  const settled = await Promise.allSettled(pools.map((pool, i) => planWith(pool, addDays(start, i), i)));
   const ok = settled.filter((r): r is PromiseFulfilledResult<DayOut & { model: string }> => r.status === 'fulfilled').map((r) => r.value);
   assert(ok.length === nDays, 503, 'The AI coach is busy right now — please try again in a minute.');
 
@@ -311,7 +325,9 @@ coach.post('/diet', async (c) => {
     }));
   });
   const ai = { model: [...new Set(ok.map((d) => d.model))].join(', '), result: { note: ok.find((d) => d.note)?.note
-    ?? `Meals planned around ${p.kcal_target} kcal and ${p.protein_g} g protein a day: a grain, a cooked dish and a protein at lunch and dinner, with portions scaled to your targets.` } };  await savePlan(c.env, id, 'diet', span, start, nDays, { note: ai.result.note, request: { span, start: b.start === 'tomorrow' ? 'tomorrow' : 'today', notes }, days: metaDays }, ai.model, items);
+    ?? `Meals planned around ${p.kcal_target} kcal and ${p.protein_g} g protein a day: a grain, a cooked dish and a protein at lunch and dinner, with portions scaled to your targets.` } };
+  const dietNote = [askedDiet ? `Following your request: ${askedDiet.map((x) => DIET_TEXT[x] ?? x).join(' + ')} only — every dish is checked against it.` : '', ai.result.note].filter(Boolean).join(' ');
+  await savePlan(c.env, id, 'diet', span, start, nDays, { note: dietNote, request: { span, start: b.start === 'tomorrow' ? 'tomorrow' : 'today', notes, diet: askedDiet }, days: metaDays }, ai.model, items);
   await countUse(c.env, id, today);
   return c.json(await planView(c.env, id, 'diet'));
 });
@@ -355,7 +371,8 @@ coach.post('/workout', async (c) => {
 
   // 1. The request decides the structure: muscles named in it become their own day (the first
   //    training day of a multi-day plan); joints mentioned as painful remove the moves that load them.
-  const req = await understandRequest(c.env, notes);
+  const workoutModels = await modelsFor(c.env, 'workout');
+  const req = await understandRequest(c.env, notes, workoutModels.includes(CLEF_MODEL));
   const custom = req.muscles.length ? requestedDay(req.muscles, goal, req.avoid) : null;
   const types = planDays(span, goal, { focus, trainDays });
   if (custom) types[Math.max(0, types.findIndex((t) => t !== 'rest'))] = 'custom';
@@ -419,9 +436,10 @@ coach.post('/workout', async (c) => {
     };
   };
   // A workout plan is fully usable without any model (rules pick the top options), so an AI outage only loses personalisation.
-  const ai = await viaClef()
-    .catch(() => askJson(c.env, messages, validate, span === 'week' ? 3000 : 1200))
-    .catch(() => ({ model: 'rules', result: { note: null as string | null, days: [] as DayPick[] } }));
+  let ai: { model: string; result: { note: string | null; days: DayPick[] } } = { model: 'rules', result: { note: null, days: [] } };
+  for (const m of workoutModels) { // the admin's order (Settings → AI coach models)
+    try { ai = m === CLEF_MODEL ? await viaClef() : await askJson(c.env, messages, validate, span === 'week' ? 3000 : 1200, [m]); break; } catch { /* next model */ }
+  }
 
   const items: Record<string, unknown>[] = [];
   const metaDays: Record<string, DayMeta> = {};

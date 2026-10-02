@@ -7,6 +7,7 @@ import { all, assert, first, int, run, str } from '../../lib/db';
 import { today as todayOf } from '../../lib/dates';
 import { serveContentImage } from '../../lib/content';
 import { reminderFor } from '../../lib/renewalPush';
+import { weightReminderFor } from '../../lib/weightPush';
 
 export const memberContent = new Hono<AppEnv>();
 memberContent.use('*', requireMember());
@@ -123,8 +124,12 @@ memberContent.post('/notifications/seen', async (c) => {
 memberContent.get('/notifications/latest', async (c) => {
   const p = await first<Record<string, unknown> & { pushed_at: string | null }>(c.env.DB,
     `SELECT id, kind, title, body, image_key, cta_link, pushed_at FROM announcements WHERE published=1 AND notify=1 ORDER BY pushed_at IS NULL, pushed_at DESC, id DESC LIMIT 1`);
-  const reminder = await reminderFor(c.env, mid(c), p?.pushed_at ?? null);
-  return c.json(reminder ?? p ?? null);
+  const [reminder, weigh] = await Promise.all([reminderFor(c.env, mid(c), p?.pushed_at ?? null), weightReminderFor(c.env, mid(c))]);
+  // Show whichever personal reminder was sent most recently (renewal is already filtered against the post push)
+  const own = [reminder, weigh && (!p?.pushed_at || weigh.sent_at > p.pushed_at) ? weigh : null]
+    .filter((x): x is NonNullable<typeof x> => !!x).sort((a, b) => b.sent_at.localeCompare(a.sent_at))[0];
+  if (own) { const { sent_at: _, ...msg } = own; return c.json(msg); }
+  return c.json(p ?? null);
 });
 
 // ── Phone push subscriptions ────────────────────────────────────────────

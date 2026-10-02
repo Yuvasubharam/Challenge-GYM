@@ -1,5 +1,7 @@
 import type { Env } from '../env';
 import { DEFAULT_ACCESS, DEFAULT_REMINDERS, type AccessSettings, type ReminderSettings } from './membership';
+import { DEFAULT_AI_MODELS, type AiModelSettings } from './ai';
+import { DEFAULT_WEIGHT_PUSH, type WeightPushSettings } from './weightTrack';
 
 export async function all<T = Record<string, unknown>>(db: D1Database, sql: string, ...params: unknown[]): Promise<T[]> {
   const r = await db.prepare(sql).bind(...params).all<T>();
@@ -24,8 +26,13 @@ export interface GymSettings {
   reminders: ReminderSettings;
   receipt: { prefix: string; next: number };
   renewal_push: RenewalPushSettings;
+  /** AI coach model order per purpose (Settings → AI coach models). */
+  ai_models: AiModelSettings;
   /** Written by the daily reminder job, not by the settings form. */
   renewal_push_log: { day: string | null; at: string | null; members: number; sent: number; failed: number };
+  weight_push: WeightPushSettings;
+  /** Written by the weekly weigh-in job. */
+  weight_push_log: { day: string | null; at: string | null; members: number; sent: number; failed: number };
 }
 
 /** Daily phone reminder to app members whose membership ends within `days_before` days. */
@@ -62,7 +69,10 @@ const DEFAULTS: GymSettings = {
   reminders: DEFAULT_REMINDERS,
   receipt: { prefix: 'CG', next: 1 },
   renewal_push: DEFAULT_RENEWAL_PUSH,
+  ai_models: DEFAULT_AI_MODELS,
   renewal_push_log: { day: null, at: null, members: 0, sent: 0, failed: 0 },
+  weight_push: DEFAULT_WEIGHT_PUSH,
+  weight_push_log: { day: null, at: null, members: 0, sent: 0, failed: 0 },
 };
 
 export async function getSettings(db: D1Database): Promise<GymSettings> {

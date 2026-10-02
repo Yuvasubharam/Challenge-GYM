@@ -3,6 +3,7 @@ import type { AppEnv } from '../../env';
 import { tzOffset } from '../../env';
 import { actor, requireAdmin } from '../../lib/auth';
 import { all, assert, audit, first, getSettings, int, isDateOrNull, nextReceiptNo, putSetting, run, str, type GymSettings } from '../../lib/db';
+import { cleanModelList, MODEL_CATALOG } from '../../lib/ai';
 import { addDays, addMonths, offsetSuffix, today as todayOf } from '../../lib/dates';
 import { listMembers } from '../../lib/members';
 import { planReconcile, reconcile, syncMember } from '../../device/queue';
@@ -10,6 +11,8 @@ import { createTerm } from '../../lib/terms';
 import { cachedView } from '../../lib/viewCache';
 import { pushConfigured } from '../../lib/content';
 import { renderReminder, renewalTargets, sendRenewalReminders } from '../../lib/renewalPush';
+import { sendWeightReminders, weightTargets } from '../../lib/weightPush';
+import { renderWeightNudge, weightTrend, type WeightTrend } from '../../lib/weightTrack';
 
 export const ops = new Hono<AppEnv>();
 ops.use('*', requireAdmin());
@@ -347,6 +350,8 @@ ops.delete('/announcements/:id', async (c) => {
 
 // ── Settings ────────────────────────────────────────────────────────────
 ops.get('/settings', async (c) => c.json(await getSettings(c.env.DB)));
+/** Models the AI coach can use (Settings → AI coach models). */
+ops.get('/ai-models', (c) => c.json({ models: MODEL_CATALOG }));
 
 ops.put('/settings/:key', requireAdmin('owner', 'admin'), async (c) => {
   const key = c.req.param('key') as keyof GymSettings;
@@ -386,6 +391,30 @@ ops.put('/settings/:key', requireAdmin('owner', 'admin'), async (c) => {
         motivation: Array.isArray(b.motivation)
           ? b.motivation.map((x: unknown) => str(x, 160)).filter((x: string | null): x is string => !!x).slice(0, 30)
           : cur.renewal_push.motivation,
+      };
+      break;
+    }
+    case 'ai_models': {
+      // Model order per purpose; 'same' = one list (diet's) used for both.
+      const same = typeof b.same === 'boolean' ? b.same : cur.ai_models.same;
+      const diet = cleanModelList(b.diet ?? cur.ai_models.diet);
+      value = { same, diet, workout: same ? diet : cleanModelList(b.workout ?? cur.ai_models.workout) };
+      break;
+    }
+    case 'weight_push': {
+      const w = cur.weight_push;
+      const lines = (v: unknown, dflt: string[]) => Array.isArray(v)
+        ? v.map((x: unknown) => str(x, 160)).filter((x: string | null): x is string => !!x).slice(0, 20)
+        : dflt;
+      value = {
+        enabled: typeof b.enabled === 'boolean' ? b.enabled : w.enabled,
+        weekday: Math.min(6, Math.max(0, int(b.weekday) ?? w.weekday)),
+        send_hour: Math.min(23, Math.max(0, int(b.send_hour) ?? w.send_hour)),
+        due_title: str(b.due_title, 120) ?? w.due_title,
+        due_message: str(b.due_message, 300) ?? w.due_message,
+        on_track: lines(b.on_track, w.on_track),
+        off_track: lines(b.off_track, w.off_track),
+        reached: lines(b.reached, w.reached),
       };
       break;
     }
@@ -429,6 +458,32 @@ ops.post('/renewal-push/send', requireAdmin('owner', 'admin'), async (c) => {
   const r = await sendRenewalReminders(c.env, { force: true });
   assert(!('skipped' in r), 400, `Not sent: ${'skipped' in r ? r.skipped : ''}`);
   await audit(c.env, actor(c), 'renewal_push.send', 'settings', 'renewal_push', r);
+  return c.json(r);
+});
+
+// ── Weekly weigh-in reminders (phone push) ──────────────────────────────
+/** Who would get a weigh-in reminder if sent now, and a preview per status. */
+ops.get('/weight-push', async (c) => {
+  const s = await getSettings(c.env.DB);
+  const today = todayFor(c);
+  const targets = await weightTargets(c.env, today);
+  const members = [...new Map(targets.map((t) => [t.member_id, t])).values()];
+  const sample = (status: WeightTrend['status'], extra: Partial<WeightTrend>) =>
+    renderWeightNudge(s.weight_push, s.gym.name, members[0]?.name ?? 'Ravi Kumar',
+      { ...weightTrend([], { start_weight_kg: 84, target_weight_kg: 74, goal: 'lose_weight' }, today), status, current: 80.4, start: 84, target: 74, change_total: -3.6, to_go: 6.4, ...extra }, today);
+  return c.json({
+    push_ready: pushConfigured(c.env),
+    log: s.weight_push_log,
+    due_now: members.slice(0, 50).map((m) => ({ member_id: m.member_id, name: m.name })),
+    due_count: members.length,
+    preview: { on_track: sample('on_track', {}), off_track: sample('off_track', { change_total: 0.8, current: 84.8, to_go: 10.8 }), reached: sample('reached', { current: 73.8, to_go: 0 }) },
+  });
+});
+
+ops.post('/weight-push/send', requireAdmin('owner', 'admin'), async (c) => {
+  const r = await sendWeightReminders(c.env, { force: true });
+  assert(!('skipped' in r), 400, `Not sent: ${'skipped' in r ? r.skipped : ''}`);
+  await audit(c.env, actor(c), 'weight_push.send', 'settings', 'weight_push', r);
   return c.json(r);
 });
 

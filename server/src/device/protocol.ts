@@ -88,8 +88,15 @@ export function parseDeviceCmd(body: string): CmdReply[] {
   return out;
 }
 
+/**
+ * The device sets its clock from the server (UTC) plus this time zone. The push protocol reads
+ * -12…12 as hours and values beyond ±60 as minutes, so a half-hour zone must go as minutes:
+ * India (+5:30) = 330. Sending 5.5 made the X990 keep itself exactly 30 minutes slow.
+ */
+export const tzOption = (offsetMin: number) => (offsetMin % 60 === 0 ? offsetMin / 60 : offsetMin);
+
 /** Handshake response. Stamp=9999 → device only sends *new* records; set to 0 to re-upload all. */
-export function handshake(sn: string, tzHours: number): string {
+export function handshake(sn: string, tzOffsetMin: number): string {
   return [
     `GET OPTION FROM: ${sn}`,
     'ATTLOGStamp=None',
@@ -100,7 +107,7 @@ export function handshake(sn: string, tzHours: number): string {
     'TransTimes=00:00;14:05',
     'TransInterval=1',
     'TransFlag=TransData AttLog OpLog EnrollUser ChgUser EnrollFP ChgFP',
-    `TimeZone=${tzHours}`,
+    `TimeZone=${tzOption(tzOffsetMin)}`,
     'Realtime=1',
     'Encrypt=None',
     '',

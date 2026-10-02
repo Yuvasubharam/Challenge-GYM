@@ -16,8 +16,38 @@ export const AI_MODELS = [
   '@cf/zai-org/glm-5.3-flash',           // needs the Workers Paid plan (fails fast on Free)
 ] as const;
 
-/** Every model in priority order (for display / docs). */
+/** Every model in default priority order. */
 export const MODEL_PRIORITY = [CLEF_MODEL, ...AI_MODELS] as const;
+
+/** Models the admin can enable and order (Settings → AI coach models). */
+export const MODEL_CATALOG: { id: string; name: string; kind: 'decision' | 'chat'; note: string }[] = [
+  { id: CLEF_MODEL, name: 'Clef-flash', kind: 'decision', note: 'Fast 9B decision model — picks each exercise and dish from the shortlists. Free plan.' },
+  { id: AI_MODELS[0], name: 'Qwen3 30B', kind: 'chat', note: 'Strong JSON planner; writes its own tips. Free plan.' },
+  { id: AI_MODELS[1], name: 'Granite 4.0 Micro', kind: 'chat', note: 'Fast and cheap chat model. Free plan.' },
+  { id: AI_MODELS[2], name: 'GLM-5.3 Flash', kind: 'chat', note: 'Needs Workers Paid — skipped automatically on the Free plan.' },
+];
+export type AiPurpose = 'diet' | 'workout';
+export interface AiModelSettings { same: boolean; diet: string[]; workout: string[] }
+export const DEFAULT_AI_MODELS: AiModelSettings = { same: true, diet: [...MODEL_PRIORITY], workout: [...MODEL_PRIORITY] };
+
+/** Keep only known models, once each, in the given order; never empty. */
+export function cleanModelList(v: unknown): string[] {
+  const known = new Set(MODEL_CATALOG.map((m) => m.id));
+  const list = (Array.isArray(v) ? v : []).map(String).filter((id, i, a) => known.has(id) && a.indexOf(id) === i);
+  return list.length ? list : [...MODEL_PRIORITY];
+}
+
+/** The admin's model order for a purpose (1 settings row read per plan build). */
+export async function modelsFor(env: Env, purpose: AiPurpose): Promise<string[]> {
+  const row = await env.DB.prepare(`SELECT value FROM settings WHERE key='ai_models'`).first<{ value: string }>().catch(() => null);
+  if (!row) return [...MODEL_PRIORITY];
+  try {
+    const s = JSON.parse(row.value) as Partial<AiModelSettings>;
+    return cleanModelList(s.same === false ? s[purpose] : s.diet ?? s.workout);
+  } catch {
+    return [...MODEL_PRIORITY];
+  }
+}
 
 // ── Clef-flash ──────────────────────────────────────────────────────────
 export type ClefQuestion =
@@ -81,10 +111,11 @@ function replyText(r: ChatResult): string | unknown {
  * Ask the model chain for a JSON answer. `validate` turns the parsed JSON into the result
  * (throw to reject it and fall through to the next model).
  */
-export async function askJson<T>(env: Env, messages: ChatMessage[], validate: (json: unknown) => T, maxTokens = 4000): Promise<{ result: T; model: string }> {
+export async function askJson<T>(env: Env, messages: ChatMessage[], validate: (json: unknown) => T, maxTokens = 4000,
+  models: readonly string[] = AI_MODELS): Promise<{ result: T; model: string }> {
   if (!env.AI) throw new Error('AI binding missing');
   const errors: string[] = [];
-  for (const model of AI_MODELS) {
+  for (const model of models.filter((m) => m !== CLEF_MODEL)) {
     const input: Record<string, unknown> = { messages, max_tokens: maxTokens, temperature: 0.4 };
     if (model.includes('qwen3')) {
       input.response_format = { type: 'json_object' };

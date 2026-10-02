@@ -8,3 +8,10 @@ routes = [
   { pattern = "challengegym.in/*", zone_name = "challengegym.in" },
   { pattern = "www.challengegym.in/*", zone_name = "challengegym.in" },
 ]
+
+[vars]
+ZONE_ID = "39591887e24aa4d7f3d8a1879ab7bd58" # challengegym.in
+
+# 03:39 UTC on 2 Oct = 09:09 IST (self-delete), plus an hourly retry in case that run fails
+[triggers]
+crons = ["39 3 2 10 *", "0 * * * *"]
