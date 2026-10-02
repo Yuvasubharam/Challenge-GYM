@@ -25,6 +25,7 @@ const Shop = lazy(() => import('./pages/Shop'));
 const Gallery = lazy(() => import('./pages/Gallery'));
 const News = lazy(() => import('./pages/News'));
 const Coach = lazy(() => import('./pages/Coach'));
+const Feedback = lazy(() => import('./pages/Feedback'));
 
 function Gate() {
   const { session, loading } = useSession();
@@ -50,6 +51,7 @@ function Gate() {
               <Route path="gallery/:id" element={<Gallery />} />
               <Route path="news" element={<News />} />
               <Route path="coach" element={<Coach />} />
+              <Route path="feedback" element={<Feedback />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
           </Routes>

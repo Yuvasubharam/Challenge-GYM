@@ -1,6 +1,7 @@
 import type { Env } from '../env';
 import { DEFAULT_ACCESS, DEFAULT_REMINDERS, type AccessSettings, type ReminderSettings } from './membership';
 import { DEFAULT_AI_MODELS, type AiModelSettings } from './ai';
+import { DEFAULT_FEEDBACK, type FeedbackSettings } from './feedbackDefaults';
 import { DEFAULT_WEIGHT_PUSH, type WeightPushSettings } from './weightTrack';
 
 export async function all<T = Record<string, unknown>>(db: D1Database, sql: string, ...params: unknown[]): Promise<T[]> {
@@ -28,6 +29,8 @@ export interface GymSettings {
   renewal_push: RenewalPushSettings;
   /** AI coach model order per purpose (Settings → AI coach models). */
   ai_models: AiModelSettings;
+  /** Member surveys + grievance types (Admin -> Feedback -> Settings). */
+  feedback: FeedbackSettings;
   /** Written by the daily reminder job, not by the settings form. */
   renewal_push_log: { day: string | null; at: string | null; members: number; sent: number; failed: number };
   weight_push: WeightPushSettings;
@@ -70,6 +73,7 @@ const DEFAULTS: GymSettings = {
   receipt: { prefix: 'CG', next: 1 },
   renewal_push: DEFAULT_RENEWAL_PUSH,
   ai_models: DEFAULT_AI_MODELS,
+  feedback: DEFAULT_FEEDBACK,
   renewal_push_log: { day: null, at: null, members: 0, sent: 0, failed: 0 },
   weight_push: DEFAULT_WEIGHT_PUSH,
   weight_push_log: { day: null, at: null, members: 0, sent: 0, failed: 0 },

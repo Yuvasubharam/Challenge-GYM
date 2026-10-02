@@ -17,6 +17,7 @@ const Device = lazy(() => import('./pages/Device'));
 const Plans = lazy(() => import('./pages/Plans'));
 const Fitness = lazy(() => import('./pages/Fitness'));
 const Coupons = lazy(() => import('./pages/Coupons'));
+const FeedbackPage = lazy(() => import('./pages/Feedback'));
 const Content = lazy(() => import('./pages/Content'));
 const SettingsPage = lazy(() => import('./pages/Settings'));
 const Receipt = lazy(() => import('./pages/Receipt'));
@@ -40,6 +41,7 @@ function Gate() {
           <Route path="plans" element={<Plans />} />
           <Route path="fitness" element={<Fitness />} />
           <Route path="coupons" element={<Coupons />} />
+          <Route path="feedback" element={<FeedbackPage />} />
           <Route path="content" element={<Content />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />

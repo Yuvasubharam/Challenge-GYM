@@ -8,6 +8,7 @@ import { me } from '../routes/member/me';
 import { fit } from '../routes/member/fitness';
 import { memberContent } from '../routes/member/content';
 import { coach } from '../routes/member/coach';
+import { memberFeedback } from '../routes/member/feedback';
 
 const app = new Hono<AppEnv>().basePath('/api');
 
@@ -50,6 +51,7 @@ app.route('/me', me);
 app.route('/fit', fit);
 app.route('/content', memberContent);
 app.route('/coach', coach);
+app.route('/feedback', memberFeedback);
 
 app.onError((err, c) => {
   if (err instanceof HttpError) return c.json({ error: err.message }, err.status as 400);

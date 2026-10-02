@@ -1,8 +1,9 @@
 import { NavLink, Outlet } from 'react-router-dom';
-import { Dumbbell, Home as HomeIcon, Images, LineChart, Megaphone, ShoppingBag, UserRound, Utensils } from 'lucide-react';
+import { Dumbbell, Home as HomeIcon, Images, LineChart, Megaphone, MessageSquareHeart, ShoppingBag, UserRound, Utensils } from 'lucide-react';
 import type { ReactNode } from 'react';
 import PushPrompt from './PushPrompt';
 import InstallPrompt from './InstallPrompt';
+import FeedbackPrompt from './FeedbackPrompt';
 
 const NAV: { to: string; label: string; icon: ReactNode }[] = [
   { to: '/', label: 'Home', icon: <HomeIcon className="w-5 h-5" /> },
@@ -16,6 +17,7 @@ const MORE: typeof NAV = [
   { to: '/news', label: 'News & events', icon: <Megaphone className="w-5 h-5" /> },
   { to: '/shop', label: 'Shop', icon: <ShoppingBag className="w-5 h-5" /> },
   { to: '/gallery', label: 'Gallery', icon: <Images className="w-5 h-5" /> },
+  { to: '/feedback', label: 'Feedback & issues', icon: <MessageSquareHeart className="w-5 h-5" /> },
 ];
 
 export default function Layout() {
@@ -44,6 +46,7 @@ export default function Layout() {
 
       <PushPrompt />
       <InstallPrompt />
+      <FeedbackPrompt />
 
       {/* Phone: floating dark pill nav with lime active tab (reference design) */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 px-4 safe-bottom pointer-events-none">

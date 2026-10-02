@@ -15,6 +15,8 @@ import { foods } from '../routes/admin/foods';
 import { fitnessAdmin } from '../routes/admin/fitness';
 import { coupons } from '../routes/admin/coupons';
 import { content } from '../routes/admin/content';
+import { feedbackAdmin } from '../routes/admin/feedback';
+import { feedbackCron } from '../lib/feedback';
 
 const app = new Hono<AppEnv>().basePath('/api');
 
@@ -55,6 +57,7 @@ app.route('/foods', foods);
 app.route('/fitness', fitnessAdmin);
 app.route('/coupons', coupons);
 app.route('/content', content);
+app.route('/feedback', feedbackAdmin);
 app.route('/', ops);
 
 app.onError((err, c) => {
@@ -73,5 +76,6 @@ export default {
   async scheduled(_evt: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(renewalCron(env).then((r) => console.log('renewal-push', JSON.stringify(r))));
     ctx.waitUntil(weightCron(env).then((r) => console.log('weight-push', JSON.stringify(r))));
+    ctx.waitUntil(feedbackCron(env).then((r) => console.log('feedback', JSON.stringify(r))).catch((e) => console.error('feedback cron', e)));
   },
 };

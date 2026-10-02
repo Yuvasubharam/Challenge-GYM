@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import {
-  Apple, BellRing, ChevronsLeft, ChevronsRight, CalendarCheck2, Cpu, LayoutGrid, LogOut, Megaphone, Menu, Moon, ReceiptIndianRupee, Settings, Sun, Tags, Ticket, Users, X,
+  Apple, BellRing, ChevronsLeft, ChevronsRight, CalendarCheck2, Cpu, LayoutGrid, LogOut, Megaphone, Menu, MessageSquareHeart, Moon, ReceiptIndianRupee, Settings, Sun, Tags, Ticket, Users, X,
 } from 'lucide-react';
 import { useSession, useTheme } from '../lib/session';
 
@@ -14,6 +14,7 @@ const NAV: NavItem[] = [
   { to: '/payments', label: 'Payments', icon: <ReceiptIndianRupee className="w-5 h-5" /> },
   { to: '/attendance', label: 'Attendance', icon: <CalendarCheck2 className="w-5 h-5" /> },
   { to: '/content', label: 'Announcements', icon: <Megaphone className="w-5 h-5" /> },
+  { to: '/feedback', label: 'Feedback & issues', icon: <MessageSquareHeart className="w-5 h-5" /> },
   { to: '/fitness', label: 'Fitness', icon: <Apple className="w-5 h-5" /> },
   { to: '/device', label: 'Device', icon: <Cpu className="w-5 h-5" /> },
   { to: '/plans', label: 'Plans', icon: <Tags className="w-5 h-5" /> },

@@ -64,6 +64,7 @@ export interface Settings {
   receipt: { prefix: string; next: number };
   renewal_push: RenewalPush;
   ai_models: AiModels;
+  feedback: { every_months: number; days_open: number; grievance_types: string[] };
   renewal_push_log: { day: string | null; at: string | null; members: number; sent: number; failed: number };
   weight_push: WeightPush;
   weight_push_log: { day: string | null; at: string | null; members: number; sent: number; failed: number };

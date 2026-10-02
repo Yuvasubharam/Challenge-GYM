@@ -407,6 +407,19 @@ ops.put('/settings/:key', requireAdmin('owner', 'admin'), async (c) => {
       };
       break;
     }
+    case 'feedback': {
+      const f = cur.feedback;
+      const types = Array.isArray(b.grievance_types)
+        ? [...new Set(b.grievance_types.map((x: unknown) => str(x, 60)).filter((x: string | null): x is string => !!x))].slice(0, 20) as string[]
+        : f.grievance_types;
+      assert(types.length, 400, 'Keep at least one issue type');
+      value = {
+        every_months: [0, 1, 2, 3, 6].includes(Number(b.every_months)) ? Number(b.every_months) : f.every_months,
+        days_open: Math.min(60, Math.max(1, int(b.days_open) ?? f.days_open)),
+        grievance_types: types,
+      };
+      break;
+    }
     case 'ai_models': {
       // Model order per purpose; 'same' = one list (diet's) used for both.
       const same = typeof b.same === 'boolean' ? b.same : cur.ai_models.same;
