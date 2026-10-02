@@ -1,6 +1,7 @@
 // Feedback & grievances: the gym's periodic survey (rate 1–5; 3 or lower asks what to improve),
 // raising an issue by type, and following up on issues already raised.
 import { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { CheckCircle2, MessageSquareWarning, Send, Star } from 'lucide-react';
 import { api } from '../lib/api';
 import { date } from '../lib/format';
@@ -67,9 +68,14 @@ export function SurveyForm({ survey, onDone }: { survey: Survey; onDone: () => v
 
 type Tab = 'survey' | 'issue' | 'mine';
 
+const TABS: Tab[] = ['survey', 'issue', 'mine'];
+
 export default function Feedback() {
   const { data, error, reload } = useLoad(() => api.get<Data>('/feedback'));
-  const [tab, setTab] = useState<Tab | null>(null);
+  // Deep links: /feedback?tab=issue (report an issue), ?tab=mine (my issues), ?tab=survey.
+  const [params] = useSearchParams();
+  const asked = params.get('tab') as Tab | null;
+  const [tab, setTab] = useState<Tab | null>(asked && TABS.includes(asked) ? asked : null);
   if (error) return <ErrorBox error={error} onRetry={reload} />;
   if (!data) return <PageLoader />;
   const current: Tab = tab ?? (data.survey ? 'survey' : 'issue');
