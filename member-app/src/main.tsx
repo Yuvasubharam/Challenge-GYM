@@ -11,6 +11,7 @@ import { FitProvider } from './lib/fitctx';
 import Welcome from './pages/Welcome';
 import AccountSetup from './pages/AccountSetup';
 import LaunchEvent from './pages/LaunchEvent';
+import PublicReceipt from './pages/PublicReceipt';
 
 const Home = lazy(() => import('./pages/Home'));
 const Visits = lazy(() => import('./pages/Visits'));
@@ -61,6 +62,9 @@ function Gate() {
 function AppRouter() {
   const { pathname } = useLocation();
   if (pathname === '/launch' || window.location.hostname === 'launch.challengegym.in') return <LaunchEvent />;
+  // Public receipt link sent to members on WhatsApp — no login.
+  const shared = /^\/r\/([A-Za-z0-9_-]{12,40})\/?$/.exec(pathname);
+  if (shared) return <PublicReceipt token={shared[1]} />;
   return <SessionProvider><Gate /></SessionProvider>;
 }
 

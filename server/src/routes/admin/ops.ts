@@ -4,6 +4,7 @@ import { tzOffset } from '../../env';
 import { actor, requireAdmin } from '../../lib/auth';
 import { all, assert, audit, first, getSettings, int, isDateOrNull, nextReceiptNo, putSetting, run, str, type GymSettings } from '../../lib/db';
 import { cleanModelList, MODEL_CATALOG } from '../../lib/ai';
+import { randomToken } from '../../lib/crypto';
 import { addDays, addMonths, offsetSuffix, today as todayOf } from '../../lib/dates';
 import { listMembers } from '../../lib/members';
 import { planReconcile, reconcile, syncMember } from '../../device/queue';
@@ -267,6 +268,18 @@ ops.get('/payments/:id/receipt', async (c) => {
   assert(p, 404, 'Payment not found');
   const s = await getSettings(c.env.DB);
   return c.json({ payment: p, gym: s.gym });
+});
+
+/** Share token for the public receipt page (member app /r/<token>); created once, then reused. */
+ops.post('/payments/:id/share', async (c) => {
+  const id = Number(c.req.param('id'));
+  const p = await first<{ share_token: string | null }>(c.env.DB, `SELECT share_token FROM payments WHERE id=?`, id);
+  assert(p, 404, 'Payment not found');
+  if (p.share_token) return c.json({ token: p.share_token });
+  const token = randomToken(12);
+  await run(c.env.DB, `UPDATE payments SET share_token=? WHERE id=? AND share_token IS NULL`, token, id);
+  const saved = await first<{ share_token: string }>(c.env.DB, `SELECT share_token FROM payments WHERE id=?`, id);
+  return c.json({ token: saved!.share_token });
 });
 
 // ── Attendance ──────────────────────────────────────────────────────────

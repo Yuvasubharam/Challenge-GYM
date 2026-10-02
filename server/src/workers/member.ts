@@ -2,7 +2,7 @@
 // Own JWT secret + cookie + `aud: member`: a member session is useless against the admin API.
 import { Hono } from 'hono';
 import type { AppEnv } from '../env';
-import { HttpError } from '../lib/db';
+import { first, getSettings, HttpError } from '../lib/db';
 import { memberAuth } from '../routes/member/auth';
 import { me } from '../routes/member/me';
 import { fit } from '../routes/member/fitness';
@@ -31,6 +31,20 @@ app.use('*', async (c, next) => {
 });
 
 app.get('/health', (c) => c.json({ ok: true, service: 'challenge-gym-member' }));
+/**
+ * Public receipt (no login): the link the desk sends into the member's WhatsApp chat. Looked up by a
+ * random share token only; the mobile number is never returned. A voided payment shows as void.
+ */
+app.get('/r/:token', async (c) => {
+  const token = c.req.param('token');
+  if (!/^[A-Za-z0-9_-]{12,40}$/.test(token)) return c.json({ error: 'Receipt not found' }, 404);
+  const p = await first(c.env.DB,
+    `SELECT p.amount, p.mode, p.paid_on, p.receipt_no, p.reference, p.entry_type, p.status, m.name, m.essl_id, ms.category, ms.duration_label, ms.start_date, ms.end_date
+     FROM payments p JOIN members m ON m.id=p.member_id LEFT JOIN memberships ms ON ms.id=p.membership_id WHERE p.share_token=?`, token);
+  if (!p) return c.json({ error: 'Receipt not found' }, 404);
+  const s = await getSettings(c.env.DB);
+  return c.json({ payment: p, gym: { name: s.gym.name, phone: s.gym.phone, address: s.gym.address } });
+});
 app.route('/auth', memberAuth);
 app.route('/me', me);
 app.route('/fit', fit);
