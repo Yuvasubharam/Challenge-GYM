@@ -16,6 +16,13 @@ async function call<T = any>(base: string, method: string, path: string, body?: 
   const ct = r.headers.get('content-type') ?? '';
   return { status: r.status, data: (ct.includes('json') ? await r.json() : await r.text()) as T, cookie: sc ? sc.split(';')[0] : cookie };
 }
+
+// 1×1 PNG — every UPI claim now needs a screenshot uploaded first.
+const PNG = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='), (ch) => ch.charCodeAt(0));
+async function proof(cookie: string): Promise<string> {
+  const r = await fetch(MEMBER + '/me/proof', { method: 'PUT', headers: { 'Content-Type': 'image/png', Cookie: cookie }, body: PNG });
+  return ((await r.json()) as { proof_key: string }).proof_key;
+}
 const addDays = (d: string, n: number) => new Date(Date.parse(d + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
 const addMonths = (d: string, n: number) => { const [y, m, day] = d.split('-').map(Number); const t = new Date(Date.UTC(y, m - 1 + n, 1)); const last = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0)).getUTCDate(); t.setUTCDate(Math.min(day, last)); return t.toISOString().slice(0, 10); };
 const today = new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
@@ -100,16 +107,16 @@ r = await call(MEMBER, 'GET', `/me/coupon-quote?plan_id=${p3m.id}&code=tpcte2e`,
 check('member sees discounted price + bonus days', r.data.total === p3m.price - Math.min(250, Math.round(p3m.price * 0.2)) && r.data.bonus_days === 3, r.data);
 check('desk-only coupon refused in app', /front desk/.test((await call(MEMBER, 'GET', `/me/coupon-quote?plan_id=${p3m.id}&code=TDESKE2E`, undefined, mc)).data.error));
 const promoTotal = r.data.total;
-r = await call(MEMBER, 'POST', '/me/payments', { amount: promoTotal - 1, reference: 'UTRE2E000001', plan_id: p3m.id, coupon_code: 'TPCTE2E' }, mc);
+r = await call(MEMBER, 'POST', '/me/payments', { amount: promoTotal - 1, reference: 'UTRE2E000001', plan_id: p3m.id, coupon_code: 'TPCTE2E', proof_key: await proof(mc) }, mc);
 check('underpaying the promo price rejected', r.status === 400);
-r = await call(MEMBER, 'POST', '/me/payments', { amount: promoTotal, reference: 'UTRE2E000001', plan_id: p3m.id, coupon_code: 'TPCTE2E' }, mc);
+r = await call(MEMBER, 'POST', '/me/payments', { amount: promoTotal, reference: 'UTRE2E000001', plan_id: p3m.id, coupon_code: 'TPCTE2E', proof_key: await proof(mc) }, mc);
 check('claim with promo accepted (pending)', r.status === 200, r.data);
 const payA = r.data.id;
 check('coupon reserved as pending', sql(`SELECT status FROM coupon_redemptions WHERE payment_id=${payA}`)[0]?.status === 'pending');
 check('reserved coupon cannot be reused meanwhile', /already used/.test((await call(MEMBER, 'GET', `/me/coupon-quote?plan_id=${p3m.id}&code=TPCTE2E`, undefined, mc)).data.error));
 await call(ADMIN, 'POST', `/payments/${payA}/reject`, { reason: 'not received' }, admin);
 check('reject releases the coupon', sql(`SELECT status FROM coupon_redemptions WHERE payment_id=${payA}`)[0].status === 'void');
-r = await call(MEMBER, 'POST', '/me/payments', { amount: promoTotal, reference: 'UTRE2E000002', plan_id: p3m.id, coupon_code: 'TPCTE2E' }, mc);
+r = await call(MEMBER, 'POST', '/me/payments', { amount: promoTotal, reference: 'UTRE2E000002', plan_id: p3m.id, coupon_code: 'TPCTE2E', proof_key: await proof(mc) }, mc);
 const payB = r.data.id;
 const before = sql(`SELECT MAX(end_date) e FROM memberships WHERE member_id=${m2} AND status='active'`)[0].e;
 r = await call(ADMIN, 'POST', `/payments/${payB}/confirm`, {}, admin);

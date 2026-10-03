@@ -20,6 +20,13 @@ async function call<T = any>(base: string, method: string, path: string, body?: 
   return { status: r.status, data: (ct.includes('json') ? await r.json() : await r.text()) as T, cookie: sc ? sc.split(';')[0] : cookie };
 }
 
+// 1×1 PNG — every UPI claim now needs a screenshot uploaded first.
+const PNG = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='), (ch) => ch.charCodeAt(0));
+async function proof(cookie: string): Promise<string> {
+  const r = await fetch(MEMBER + '/me/proof', { method: 'PUT', headers: { 'Content-Type': 'image/png', Cookie: cookie }, body: PNG });
+  return ((await r.json()) as { proof_key: string }).proof_key;
+}
+
 console.log('\n── 0. setup');
 sql(`UPDATE devices SET approved=0`);
 // Only this test's members are touched — real member logins (e.g. staff who activated) are kept.
@@ -77,14 +84,18 @@ const other = sql(`SELECT id FROM payments WHERE member_id <> ${exp.id} AND stat
 check("cannot read another member's receipt", (await call(MEMBER, 'GET', `/me/receipt/${other.id}`, undefined, mc)).status === 404);
 
 console.log('\n── 4. UPI renewal → desk confirms → renewed + door restored');
-r = await call(MEMBER, 'POST', '/me/payments', { amount: plan.price - 1, reference: '426500000001', plan_id: plan.id }, mc);
-check('underpayment for plan rejected', r.status === 400);
-r = await call(MEMBER, 'POST', '/me/payments', { amount: plan.price, reference: 'x', plan_id: plan.id }, mc);
-check('invalid UTR rejected', r.status === 400);
 r = await call(MEMBER, 'POST', '/me/payments', { amount: plan.price, reference: '426500000001', plan_id: plan.id }, mc);
+check('claim without screenshot rejected', r.status === 400);
+r = await call(MEMBER, 'POST', '/me/payments', { amount: plan.price, reference: '426500000001', plan_id: plan.id, proof_key: `proofs/member-${exp.id}-0` }, mc);
+check('claim with never-uploaded screenshot rejected', r.status === 400);
+r = await call(MEMBER, 'POST', '/me/payments', { amount: plan.price - 1, reference: '426500000001', plan_id: plan.id, proof_key: await proof(mc) }, mc);
+check('underpayment for plan rejected', r.status === 400);
+r = await call(MEMBER, 'POST', '/me/payments', { amount: plan.price, reference: 'x', plan_id: plan.id, proof_key: await proof(mc) }, mc);
+check('invalid UTR rejected', r.status === 400);
+r = await call(MEMBER, 'POST', '/me/payments', { amount: plan.price, reference: '426500000001', plan_id: plan.id, proof_key: await proof(mc) }, mc);
 check('renewal claim submitted (pending)', r.status === 200 && r.data.status === 'pending', r.data);
 const payId = r.data.id;
-check('duplicate UTR rejected', (await call(MEMBER, 'POST', '/me/payments', { amount: plan.price, reference: '426500000001', plan_id: plan.id }, mc)).status === 409);
+check('duplicate UTR rejected', (await call(MEMBER, 'POST', '/me/payments', { amount: plan.price, reference: '426500000001', plan_id: plan.id, proof_key: await proof(mc) }, mc)).status === 409);
 r = await call(MEMBER, 'GET', '/me/plan', undefined, mc);
 check('member sees renewal waiting', r.data.pending_renewal?.id === payId);
 r = await call(ADMIN, 'GET', '/payments?status=pending', undefined, admin);

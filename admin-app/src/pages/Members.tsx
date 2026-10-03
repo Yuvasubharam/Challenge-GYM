@@ -23,6 +23,7 @@ const FILTERS = [
   { value: 'app_users', label: 'App users' },
   { value: 'app_off', label: 'App off' },
   { value: 'no_consent', label: 'No consent' },
+  { value: 'archived', label: 'Archived' },
 ];
 
 // Phone icon for members with a member-app account; tooltip says when they last signed in.
@@ -40,6 +41,8 @@ export default function Members() {
   const { can } = useSession();
   const status = params.get('status') ?? '';
   const sort = params.get('sort') ?? 'name';
+  // "Archived" is a separate list on the server (archived=1), not a status filter.
+  const archived = status === 'archived';
   const [q, setQ] = useState(params.get('q') ?? '');
   const [debounced, setDebounced] = useState(q);
   const [limit, setLimit] = useState(PAGE);
@@ -49,7 +52,7 @@ export default function Members() {
   useEffect(() => setLimit(PAGE), [debounced, status, sort]);
 
   // Load everything once per filter; search runs locally for instant results at gym scale.
-  const { data, error, reload, setData } = useLoad(() => api.get<{ total: number; members: MemberSummary[] }>(`/members${qs({ status, sort })}`), [status, sort]);
+  const { data, error, reload, setData } = useLoad(() => api.get<{ total: number; members: MemberSummary[] }>(`/members${qs(archived ? { archived: '1', sort } : { status, sort })}`), [status, sort]);
 
   const list = useMemo(() => {
     const all = data?.members ?? [];
@@ -64,7 +67,7 @@ export default function Members() {
 
   return (
     <>
-      <PageHeader title="Members" subtitle={data ? `${list.length} of ${data.total}` : undefined}
+      <PageHeader title="Members" subtitle={data ? `${list.length} of ${data.total}${archived ? ' archived' : ''}` : undefined}
         actions={<>
           {can('owner', 'admin') && <a className="btn btn-outline" href="/api/export/members.csv"><Download className="w-4 h-4" /><span className="hidden sm:inline">Export</span></a>}
           <button className="btn btn-primary" onClick={() => setAdding(true)}><UserPlus className="w-4 h-4" />Add member</button>
@@ -82,7 +85,7 @@ export default function Members() {
       <div className="mb-5"><Segmented value={status} options={FILTERS} onChange={(v) => setParam('status', v)} /></div>
 
       {error ? <ErrorBox error={error} onRetry={reload} /> : !data ? <PageLoader /> : list.length === 0 ? (
-        <div className="card"><Empty icon={<Users className="w-6 h-6" />} title="No members found" hint={debounced ? 'Try a different search.' : 'Import your Excel sheet from Settings, or add a member.'} /></div>
+        <div className="card"><Empty icon={<Users className="w-6 h-6" />} title={archived ? 'No archived members' : 'No members found'} hint={debounced ? 'Try a different search.' : archived ? 'Archived members appear here; open one to restore it.' : 'Import your Excel sheet from Settings, or add a member.'} /></div>
       ) : (
         <>
           {/* Desktop / tablet table */}

@@ -5,6 +5,7 @@ import QRCode from 'qrcode';
 import { api } from '../lib/api';
 import { date, money } from '../lib/format';
 import { useHome } from '../lib/home';
+import { processScreenshot } from '../lib/photo';
 import type { MyPayment, Plan } from '../lib/types';
 import { ErrorBox, Field, PageLoader, Sheet, Spinner, useAction, useLoad } from '../components/ui';
 
@@ -120,6 +121,7 @@ function PaySheet({ amount: listAmount, plan, onClose, onDone }: { amount: numbe
   const [qr, setQr] = useState('');
   const [utr, setUtr] = useState('');
   const [proof, setProof] = useState<string | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [copied, setCopied] = useState(false);
   // Promo code (renewals only): validated by the server; the desk applies it on confirmation.
@@ -142,20 +144,26 @@ function PaySheet({ amount: listAmount, plan, onClose, onDone }: { amount: numbe
 
   useEffect(() => { if (link) QRCode.toDataURL(link, { margin: 1, width: 240, color: { dark: '#0E0F11', light: '#FFFFFF' } }).then(setQr).catch(() => setQr('')); }, [link]);
 
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
+
   const upload = async (file?: File) => {
     if (!file) return;
     setUploading(true);
-    const r = await run(() => api.upload<{ proof_key: string }>('/me/proof', file));
+    const r = await run(async () => {
+      const img = await processScreenshot(file);
+      const res = await api.upload<{ proof_key: string }>('/me/proof', img);
+      return { ...res, img };
+    });
     setUploading(false);
-    if (r) setProof(r.proof_key);
+    if (r) { setProof(r.proof_key); setPreview(URL.createObjectURL(r.img)); }
   };
 
-  const submit = () => run(() => api.post('/me/payments', { amount, reference: utr.trim(), plan_id: plan?.id, proof_key: proof ?? undefined, coupon_code: promo?.coupon?.code }),
+  const submit = () => run(() => api.post('/me/payments', { amount, reference: utr.trim(), plan_id: plan?.id, proof_key: proof, coupon_code: promo?.coupon?.code }),
     'Sent! The front desk will confirm shortly.').then((r) => r && onDone());
 
   return (
     <Sheet open onClose={onClose} title={plan ? `Renew — ${plan.name}` : 'Pay dues'}
-      footer={upi ? <button className="btn btn-primary btn-lg w-full" disabled={busy || utr.trim().length < 6 || uploading} onClick={submit}>{busy && <Spinner className="w-4 h-4" />}I've paid — send for confirmation</button> : undefined}>
+      footer={upi ? <button className="btn btn-primary btn-lg w-full" disabled={busy || utr.trim().length < 6 || uploading || !proof} onClick={submit}>{busy && <Spinner className="w-4 h-4" />}I've paid — send for confirmation</button> : undefined}>
       <div className="text-center rounded-3xl bg-lime/15 py-5 mb-4">
         <p className="text-xs muted font-semibold">Amount</p>
         <p className="font-display text-4xl font-bold">{money(amount)}</p>
@@ -207,10 +215,17 @@ function PaySheet({ amount: listAmount, plan, onClose, onDone }: { amount: numbe
             <Field label="UPI transaction ID / UTR" hint="12-digit number shown in your UPI app after paying">
               <input className="input font-mono tracking-wide" value={utr} onChange={(e) => setUtr(e.target.value.replace(/\s/g, ''))} inputMode="numeric" placeholder="e.g. 426512345678" autoComplete="off" />
             </Field>
-            <label className="mt-3 flex items-center gap-2 text-sm cursor-pointer muted hover:text-inherit">
-              {uploading ? <Spinner className="w-4 h-4" /> : proof ? <CheckCircle2 className="w-4 h-4 text-ok" /> : <ImagePlus className="w-4 h-4" />}
-              {proof ? 'Screenshot attached' : 'Attach payment screenshot (optional)'}
-              <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={(e) => upload(e.target.files?.[0])} />
+          </div>
+          <div>
+            <p className="text-sm font-semibold mb-2"><span className="inline-flex w-6 h-6 rounded-full bg-ink-900 text-lime dark:bg-lime dark:text-ink-900 text-xs items-center justify-center mr-2">3</span>Upload the payment screenshot <span className="text-bad">*</span></p>
+            <label className={`flex items-center gap-3 rounded-2xl border-2 border-dashed px-4 py-3 cursor-pointer ${proof ? 'border-ok/60' : 'border-paper-line dark:border-ink-600 hover:border-lime'}`}>
+              {preview ? <img src={preview} alt="Payment screenshot" className="w-12 h-16 object-cover rounded-lg border border-paper-line dark:border-ink-600" />
+                : <span className="w-12 h-12 rounded-xl bg-black/5 dark:bg-white/10 flex items-center justify-center">{uploading ? <Spinner className="w-5 h-5" /> : <ImagePlus className="w-5 h-5" />}</span>}
+              <span className="flex-1 text-sm">
+                {uploading ? 'Uploading…' : proof ? <span className="inline-flex items-center gap-1.5 font-semibold"><CheckCircle2 className="w-4 h-4 text-ok" />Screenshot attached</span> : <b>Tap to attach screenshot</b>}
+                <span className="block text-xs muted">{proof ? 'Tap to change' : 'Required — the success screen showing amount and UTR'}</span>
+              </span>
+              <input type="file" accept="image/*" className="hidden" onChange={(e) => { void upload(e.target.files?.[0]); e.target.value = ''; }} />
             </label>
           </div>
           <p className="text-xs muted">{plan ? 'Once the gym confirms your payment, your plan renews and your fingerprint access is restored automatically.' : 'The gym will confirm your payment and clear your dues.'}</p>

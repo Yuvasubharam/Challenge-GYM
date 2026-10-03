@@ -154,8 +154,11 @@ me.post('/payments', async (c) => {
     couponDiscount = priced?.quote.coupon_discount ?? 0;
     remarks = `Renewal request: ${plan.name} (member app)${priced?.coupon ? ` · coupon ${priced.coupon.code} −₹${couponDiscount}${priced.coupon.bonus_days ? `, +${priced.coupon.bonus_days} days` : ''}` : ''}`;
   }
+  // Screenshot is mandatory: the desk checks it against the bank before confirming.
   const proof = str(b.proof_key, 120);
-  assert(!proof || proof.startsWith(`proofs/member-${id}-`), 400, 'Invalid screenshot');
+  assert(proof, 400, 'Attach the payment screenshot from your UPI app');
+  assert(proof.startsWith(`proofs/member-${id}-`), 400, 'Invalid screenshot');
+  if (c.env.FILES) assert(await c.env.FILES.head(proof), 400, 'Screenshot upload not found — please attach it again');
 
   // Dues payments attach to the oldest term with a balance; renewals get their term on confirmation.
   let membershipId: number | null = null;
@@ -165,7 +168,7 @@ me.post('/payments', async (c) => {
     membershipId = due?.membership_id ?? null;
   }
   const p = await recordPayment(c.env, id, membershipId, {
-    amount, mode: 'upi', reference, entry_type: planId ? 'renewal' : 'due', status: 'pending', remarks, proof_key: proof ?? undefined, request_plan_id: planId,
+    amount, mode: 'upi', reference, entry_type: planId ? 'renewal' : 'due', status: 'pending', remarks, proof_key: proof, request_plan_id: planId,
   }, `member:${c.get('session').name}`);
   if (couponId) {
     await run(c.env.DB, `UPDATE payments SET coupon_id=? WHERE id=?`, couponId, p.id);
@@ -182,7 +185,7 @@ me.get('/coupon-quote', async (c) => {
     coupon: r.coupon ? { code: r.coupon.code, description: r.coupon.description } : null });
 });
 
-/** Payment screenshot → R2 (optional, helps the desk verify). */
+/** Payment screenshot → R2 (required for every UPI claim; the desk verifies against it). */
 me.put('/proof', async (c) => {
   assert(c.env.FILES, 503, 'Uploads are not available right now');
   const type = c.req.header('content-type') ?? '';
